@@ -5,8 +5,13 @@ from threading import Lock
 
 import numpy as np
 
-from .constants import DEFAULT_PREAMP_DB, MAX_INPUT_CHANNELS, OUTPUT_CHANNELS
+from .constants import DEFAULT_PREAMP_DB, MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMPLE_RATE
 from .matrix import MATRIX
+
+LFE_CHANNEL_INDEX = 3
+LFE_LOWPASS_CUTOFF_HZ = 125.0
+DRY_DELAY_SAMPLES = 172
+_BUTTERWORTH_Q_VALUES = (0.541196100146197, 1.3065629648763766)
 
 
 def db_to_linear(db_value: float) -> float:
@@ -15,6 +20,20 @@ def db_to_linear(db_value: float) -> float:
 
 def linear_to_db(value: float) -> float:
     return float(20.0 * np.log10(max(float(value), 1e-6)))
+
+
+def _butterworth_lowpass_sos(cutoff_hz: float, sample_rate: float) -> np.ndarray:
+    k = float(np.tan(np.pi * cutoff_hz / sample_rate))
+    sections = []
+    for q in _BUTTERWORTH_Q_VALUES:
+        norm = 1.0 / (1.0 + k / q + k * k)
+        b0 = k * k * norm
+        b1 = 2.0 * b0
+        b2 = b0
+        a1 = 2.0 * (k * k - 1.0) * norm
+        a2 = (1.0 - k / q + k * k) * norm
+        sections.append((b0, b1, b2, a1, a2))
+    return np.array(sections, dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -48,7 +67,7 @@ class DownmixProcessor:
         matrix: np.ndarray = MATRIX,
         max_channels: int = MAX_INPUT_CHANNELS,
     ) -> None:
-        self.matrix = np.asarray(matrix, dtype=np.float32)
+        self.matrix = np.asarray(matrix, dtype=np.float64)
         if self.matrix.shape != (max_channels, OUTPUT_CHANNELS):
             raise ValueError("matrix must be 16x2")
 
@@ -64,7 +83,12 @@ class DownmixProcessor:
 
         self._scratch_frames = 0
         self._input16 = np.zeros((0, max_channels), dtype=np.float32)
-        self._stereo = np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
+        self._processed16 = np.zeros((0, max_channels), dtype=np.float32)
+        self._lfe_scratch = np.zeros(0, dtype=np.float32)
+        self._stereo = np.zeros((0, OUTPUT_CHANNELS), dtype=np.float64)
+        self._dry_delay_buffer = np.zeros((DRY_DELAY_SAMPLES, max_channels), dtype=np.float32)
+        self._lfe_lowpass_sos = _butterworth_lowpass_sos(LFE_LOWPASS_CUTOFF_HZ, SAMPLE_RATE)
+        self._lfe_filter_state = np.zeros((len(self._lfe_lowpass_sos), 2), dtype=np.float64)
 
         self._channel_levels = np.zeros(max_channels, dtype=np.float32)
         self._left_meter = 0.0
@@ -88,7 +112,12 @@ class DownmixProcessor:
             self._user_volume = scalar
 
     def reset_limiter(self) -> None:
+        self.reset_runtime_state()
+
+    def reset_runtime_state(self) -> None:
         self._limiter_gain = 1.0
+        self._dry_delay_buffer.fill(0.0)
+        self._lfe_filter_state.fill(0.0)
 
     def process(self, indata: np.ndarray, outdata: np.ndarray | None = None) -> np.ndarray:
         if indata.ndim != 2:
@@ -97,6 +126,12 @@ class DownmixProcessor:
         frames, channels = indata.shape
         self._ensure_scratch(frames)
         input16 = self._prepare_input(indata, frames, channels)
+        channel_levels = (
+            np.max(np.abs(input16), axis=0).astype(np.float32, copy=False)
+            if frames
+            else np.zeros(self.max_channels, dtype=np.float32)
+        )
+        processed16 = self._apply_sharur_processing(input16, frames)
 
         with self._config_lock:
             preamp_gain = self._preamp_gain
@@ -105,7 +140,7 @@ class DownmixProcessor:
             master_volume = self._master_volume
             master_muted = self._master_muted
 
-        np.dot(input16, self.matrix, out=self._stereo[:frames])
+        np.dot(processed16, self.matrix, out=self._stereo[:frames])
         self._stereo[:frames] *= preamp_gain
 
         peak_before_limiter = float(np.max(np.abs(self._stereo[:frames]))) if frames else 0.0
@@ -135,11 +170,6 @@ class DownmixProcessor:
             outdata[:, :OUTPUT_CHANNELS] = self._stereo[:frames]
             rendered = outdata[:, :OUTPUT_CHANNELS]
 
-        channel_levels = (
-            np.max(np.abs(input16), axis=0).astype(np.float32, copy=False)
-            if frames
-            else np.zeros(self.max_channels, dtype=np.float32)
-        )
         left_meter = float(np.max(np.abs(rendered[:, 0]))) if frames else 0.0
         right_meter = float(np.max(np.abs(rendered[:, 1]))) if frames else 0.0
 
@@ -178,14 +208,54 @@ class DownmixProcessor:
             return
         self._scratch_frames = frames
         self._input16 = np.zeros((frames, self.max_channels), dtype=np.float32)
-        self._stereo = np.zeros((frames, OUTPUT_CHANNELS), dtype=np.float32)
+        self._processed16 = np.zeros((frames, self.max_channels), dtype=np.float32)
+        self._lfe_scratch = np.zeros(frames, dtype=np.float32)
+        self._stereo = np.zeros((frames, OUTPUT_CHANNELS), dtype=np.float64)
 
     def _prepare_input(self, indata: np.ndarray, frames: int, channels: int) -> np.ndarray:
-        if channels == self.max_channels and indata.dtype == np.float32:
-            return indata[:, : self.max_channels]
-
         input16 = self._input16[:frames]
         input16.fill(0.0)
         copy_channels = min(channels, self.max_channels)
-        input16[:, :copy_channels] = indata[:, :copy_channels]
+        if copy_channels:
+            input16[:, :copy_channels] = indata[:, :copy_channels]
         return input16
+
+    def _apply_sharur_processing(self, input16: np.ndarray, frames: int) -> np.ndarray:
+        processed16 = self._processed16[:frames]
+        if not frames:
+            return processed16
+
+        lfe = self._filter_lfe(input16[:, LFE_CHANNEL_INDEX], frames)
+        self._apply_dry_delay(input16, processed16, frames)
+        processed16[:, LFE_CHANNEL_INDEX] = lfe
+        return processed16
+
+    def _filter_lfe(self, samples: np.ndarray, frames: int) -> np.ndarray:
+        lfe = self._lfe_scratch[:frames]
+        lfe[:] = samples
+
+        for section_index, (b0, b1, b2, a1, a2) in enumerate(self._lfe_lowpass_sos):
+            z1, z2 = self._lfe_filter_state[section_index]
+            for frame in range(frames):
+                sample = float(lfe[frame])
+                output = b0 * sample + z1
+                z1 = b1 * sample - a1 * output + z2
+                z2 = b2 * sample - a2 * output
+                lfe[frame] = output
+            self._lfe_filter_state[section_index, 0] = z1
+            self._lfe_filter_state[section_index, 1] = z2
+
+        return lfe
+
+    def _apply_dry_delay(self, input16: np.ndarray, processed16: np.ndarray, frames: int) -> None:
+        head = min(frames, DRY_DELAY_SAMPLES)
+        processed16[:head] = self._dry_delay_buffer[:head]
+        if frames > DRY_DELAY_SAMPLES:
+            processed16[DRY_DELAY_SAMPLES:frames] = input16[: frames - DRY_DELAY_SAMPLES]
+
+        if frames >= DRY_DELAY_SAMPLES:
+            self._dry_delay_buffer[:] = input16[frames - DRY_DELAY_SAMPLES:frames]
+        else:
+            keep = DRY_DELAY_SAMPLES - frames
+            self._dry_delay_buffer[:keep] = self._dry_delay_buffer[frames:]
+            self._dry_delay_buffer[keep:] = input16[:frames]

@@ -38,16 +38,19 @@ from .settings import load_settings, save_settings
 from .startup import is_system_autostart_enabled, set_system_autostart
 
 BLACK = "#000000"
-PANEL = "#050505"
-PANEL_LIFT = "#0a0a0a"
-PANEL_SOFT = "#101010"
-BORDER = "#1c1c1c"
+PANEL = "#030303"
+PANEL_LIFT = "#080808"
+PANEL_SOFT = "#0f0f0f"
+BORDER = "#181818"
 BORDER_HOT = "#f2f2f2"
-TEXT = "#f4f4f4"
-MID = "#a9a9a9"
-DIM = "#666666"
+TEXT = "#eeeeee"
+MID = "#b7b7b7"
+DIM = "#747474"
 WARN = "#d8b15d"
 ERROR = "#f26d6d"
+SUCCESS = "#68d98f"
+STOPPED = "#b06a6a"
+APP_HEADING = "Downmix Renderer 7.1"
 
 BASE_STYLE = f"""
 QWidget {{
@@ -58,7 +61,7 @@ QWidget {{
 }}
 QLabel#title {{
     color: {TEXT};
-    font-size: 22px;
+    font-size: 21px;
     font-weight: 650;
 }}
 QLabel#subtitle {{
@@ -77,10 +80,25 @@ QLabel#value {{
     font-family: Consolas, monospace;
     font-size: 11px;
 }}
+QLabel#value[status="running"] {{
+    color: {SUCCESS};
+}}
+QLabel#value[status="stopped"] {{
+    color: {STOPPED};
+}}
+QLabel#value[status="warning"] {{
+    color: {WARN};
+}}
+QLabel#value[status="error"] {{
+    color: {ERROR};
+}}
+QLabel#value[status="neutral"] {{
+    color: {MID};
+}}
 QFrame#card {{
-    background-color: #020202;
-    border: 1px solid #0f0f0f;
-    border-radius: 11px;
+    background-color: {PANEL};
+    border: 1px solid #141414;
+    border-radius: 8px;
 }}
 QFrame#titlebar {{
     background-color: #000000;
@@ -89,13 +107,13 @@ QFrame#titlebar {{
 QComboBox {{
     background-color: {BLACK};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 7px;
     padding: 7px 10px;
     min-height: 31px;
     color: {TEXT};
 }}
 QComboBox:hover {{
-    border-color: #3a3a3a;
+    border-color: #444444;
 }}
 QComboBox QAbstractItemView {{
     background-color: {BLACK};
@@ -105,34 +123,34 @@ QComboBox QAbstractItemView {{
 }}
 QLineEdit {{
     background-color: #000000;
-    border: 1px solid #111111;
-    border-radius: 6px;
+    border: 1px solid #151515;
+    border-radius: 7px;
     padding: 8px 10px;
     color: {TEXT};
     selection-background-color: #ffffff;
     selection-color: #000000;
 }}
 QLineEdit:hover {{
-    border-color: #333333;
+    border-color: #444444;
 }}
 QLineEdit:focus {{
-    border-color: #666666;
+    border-color: #777777;
 }}
 QPushButton {{
     background-color: {BLACK};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 7px;
     padding: 8px 13px;
     min-height: 31px;
     color: {TEXT};
     font-weight: 600;
 }}
 QPushButton:hover {{
-    border-color: #777777;
-    background-color: #060606;
+    border-color: #5c5c5c;
+    background-color: #050505;
 }}
 QPushButton:pressed {{
-    background-color: #111111;
+    background-color: #0d0d0d;
 }}
 QPushButton#preset {{
     color: {MID};
@@ -140,8 +158,8 @@ QPushButton#preset {{
 }}
 QPushButton#preset[active="true"] {{
     color: #000000;
-    background-color: #f2f2f2;
-    border-color: #f2f2f2;
+    background-color: #e8e8e8;
+    border-color: #e8e8e8;
 }}
 QPushButton#ghost {{
     color: {MID};
@@ -156,8 +174,8 @@ QPushButton#window {{
     background-color: #000000;
 }}
 QPushButton#window:hover {{
-    color: #000000;
-    background-color: #ffffff;
+    color: {TEXT};
+    background-color: #101010;
 }}
 QPushButton#windowClose {{
     border: none;
@@ -169,15 +187,15 @@ QPushButton#windowClose {{
     background-color: #000000;
 }}
 QPushButton#windowClose:hover {{
-    color: #000000;
-    background-color: #ffffff;
+    color: #ff8a8a;
+    background-color: #140606;
 }}
 QPushButton#start {{
-    color: #ffffff;
-    border-color: #505050;
+    color: {SUCCESS};
+    border-color: #274634;
 }}
 QPushButton#stop {{
-    color: {ERROR};
+    color: {STOPPED};
     border-color: #4b2020;
 }}
 QPushButton#mode {{
@@ -187,8 +205,8 @@ QPushButton#mode {{
 }}
 QPushButton#mode[active="true"] {{
     color: #000000;
-    background-color: #ffffff;
-    border-color: #ffffff;
+    background-color: #e8e8e8;
+    border-color: #e8e8e8;
 }}
 QSlider::groove:horizontal {{
     height: 3px;
@@ -242,9 +260,9 @@ def card(layout: QtWidgets.QLayout) -> QtWidgets.QFrame:
     frame.setObjectName("card")
     frame.setLayout(layout)
     shadow = QtWidgets.QGraphicsDropShadowEffect(frame)
-    shadow.setBlurRadius(22)
-    shadow.setOffset(0, 2)
-    shadow.setColor(QtGui.QColor(255, 255, 255, 10))
+    shadow.setBlurRadius(18)
+    shadow.setOffset(0, 1)
+    shadow.setColor(QtGui.QColor(255, 255, 255, 8))
     frame.setGraphicsEffect(shadow)
     return frame
 
@@ -414,6 +432,10 @@ class RendererWindow(QtWidgets.QWidget):
         self.setMinimumSize(1160, 720)
         self.setStyleSheet(BASE_STYLE)
         self._set_icon()
+        self._closing_with_animation = False
+        self._shown_with_animation = False
+        self._fade_animation: QtCore.QPropertyAnimation | None = None
+        self.setWindowOpacity(0.0)
 
         self.engine = AudioEngine()
         self.settings = load_settings()
@@ -476,10 +498,40 @@ class RendererWindow(QtWidgets.QWidget):
 
         QtCore.QTimer.singleShot(300, self._auto_start_if_needed)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._shown_with_animation:
+            return
+        self._shown_with_animation = True
+        self._animate_opacity(0.0, 1.0, 180, QtCore.QEasingCurve.OutCubic)
+
     def closeEvent(self, event) -> None:
-        self._persist_state(was_running=self.engine.snapshot().running)
-        self.engine.close()
+        if not self._closing_with_animation:
+            event.ignore()
+            self._closing_with_animation = True
+            self._persist_state(was_running=self.engine.snapshot().running)
+            self.engine.close()
+            self._animate_opacity(self.windowOpacity(), 0.0, 130, QtCore.QEasingCurve.InCubic, self.close)
+            return
         super().closeEvent(event)
+
+    def _animate_opacity(
+        self,
+        start: float,
+        end: float,
+        duration_ms: int,
+        easing: QtCore.QEasingCurve.Type,
+        finished: object | None = None,
+    ) -> None:
+        animation = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        animation.setDuration(duration_ms)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setEasingCurve(easing)
+        if finished is not None:
+            animation.finished.connect(finished)
+        self._fade_animation = animation
+        animation.start()
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -501,7 +553,7 @@ class RendererWindow(QtWidgets.QWidget):
 
         text_col = QtWidgets.QVBoxLayout()
         text_col.setSpacing(0)
-        title = QtWidgets.QLabel(APP_DISPLAY_NAME)
+        title = QtWidgets.QLabel(APP_HEADING)
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel("WASAPI stereo render path | 48 kHz | 256 samples")
         subtitle.setObjectName("subtitle")
@@ -628,6 +680,7 @@ class RendererWindow(QtWidgets.QWidget):
         layout.addLayout(buttons)
 
         self.status_label = value_label("Standby")
+        self._set_status("Standby", "neutral")
         layout.addWidget(self.status_label)
 
         self.smart_switch_checkbox = QtWidgets.QCheckBox("Smart preset switching")
@@ -846,7 +899,7 @@ class RendererWindow(QtWidgets.QWidget):
             self.system_boot_checkbox.blockSignals(True)
             self.system_boot_checkbox.setChecked(is_system_autostart_enabled())
             self.system_boot_checkbox.blockSignals(False)
-            self.status_label.setText(f"Boot autostart: {detail}")
+            self._set_status(f"Boot autostart: {detail}", "warning")
         self._persist_state(was_running=self.engine.snapshot().running)
 
     def set_channel_config(self, config_id: str, persist: bool = True) -> None:
@@ -984,20 +1037,20 @@ class RendererWindow(QtWidgets.QWidget):
         input_device = self._selected_device(self.input_combo)
         output_device = self._selected_device(self.output_combo)
         if input_device is None or output_device is None:
-            self.status_label.setText("No WASAPI route")
+            self._set_status("No WASAPI route", "error")
             return
         try:
             self.engine.start(input_device, output_device)
-            self.status_label.setText("Running")
+            self._set_status("Running", "running")
             self._force_auto_start = True
             self._persist_state(was_running=True)
         except Exception as exc:
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc), "error")
             self._persist_state(was_running=False)
 
     def stop_audio(self) -> None:
         self.engine.stop()
-        self.status_label.setText("Stopped")
+        self._set_status("Stopped", "stopped")
         self._force_auto_start = False
         self._persist_state(was_running=False, auto_start=False)
 
@@ -1019,7 +1072,10 @@ class RendererWindow(QtWidgets.QWidget):
         self.system_volume_label.setText(f"Windows: {sys_text} ({source})")
 
         if snapshot.running:
-            self.status_label.setText("Limiting" if dsp.clipping else "Running")
+            if dsp.clipping:
+                self._set_status("Limiting", "warning")
+            else:
+                self._set_status("Running", "running")
 
         active_preset = self._preset_by_id(self.active_preset_id)
         self.diag_labels["Preset"].setText(active_preset.name if active_preset else "--")
@@ -1031,6 +1087,19 @@ class RendererWindow(QtWidgets.QWidget):
 
     def channel_config_label(self) -> str:
         return str(CHANNEL_LAYOUTS[self.channel_config]["label"])
+
+    def _set_status(self, text: str, status: str) -> None:
+        if (
+            getattr(self, "_status_text", None) == text
+            and getattr(self, "_status_state", None) == status
+        ):
+            return
+        self._status_text = text
+        self._status_state = status
+        self.status_label.setText(text)
+        self.status_label.setProperty("status", status)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
 
     def _persist_state(self, was_running: bool, auto_start: bool | None = None) -> None:
         input_device = self._selected_device(self.input_combo)

@@ -55,7 +55,7 @@ class AudioEngine:
         if output_device.max_output_channels < OUTPUT_CHANNELS:
             raise RuntimeError("Output must expose at least 2 channels")
 
-        self.processor.reset_limiter()
+        self.processor.reset_runtime_state()
         self._stream = sd.Stream(
             samplerate=SAMPLE_RATE,
             blocksize=BLOCK_SIZE,
