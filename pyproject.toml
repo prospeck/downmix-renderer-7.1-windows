@@ -1,22 +1,24 @@
 [project]
-name = "downmix-renderer-research"
+name = "downmix-renderer-production"
 version = "0.1.0"
-description = "Windows 9.1.6 downmix renderer research build"
+description = "Production Windows 9.1.6 downmix renderer"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "sounddevice",
-    "PyQt5",
+    "numpy==2.2.6",
+    "sounddevice==0.5.5",
+    "PyQt5==5.15.11",
+    "pywin32==311",
 ]
 
 [project.optional-dependencies]
 volume-pycaw = [
-    "pycaw",
-    "comtypes",
+    "pycaw==20251023",
+    "comtypes==1.4.16",
 ]
 build = [
-    "Pillow",
-    "pyinstaller",
+    "Pillow==12.2.0",
+    "pyinstaller==6.20.0",
+    "ziglang==0.16.0",
 ]
 test = []
 

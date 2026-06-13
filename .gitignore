@@ -1,13 +1,49 @@
+# Python
 __pycache__/
 *.py[cod]
+.venv/
+venv/
 
-build/
-dist/
-
+# Local runtime state
 settings.json
 settings.json.tmp
 route_probe_*.json
 
-.venv/
-venv/
+# Build/generated folders
+.build/
+build/
+dist/
+out/
+bin/
+obj/
+x64/
+Debug/
+Release/
+analysis_artifacts/
+* Build/
+final*/
+Finalised*/
+final dist/
+Finalised Version/
+build_final*/
+layout_previews/
+Trash/
+Trash/cleanup-*/
 
+# Executables and compiled binaries
+*.exe
+*.dll
+*.pyd
+*.zip
+*.7z
+*.lib
+*.obj
+*.pdb
+*.ilk
+
+# Logs/temp
+*.log
+*.tmp
+
+# Local migration metadata
+.git.stale-*

@@ -37,6 +37,20 @@ class NullVolumeFollower:
 
 class PycawVolumeFollower:
     def __init__(self) -> None:
+        self._endpoint = None
+        self._create_endpoint()
+
+    def get_state(self) -> VolumeState:
+        try:
+            return self._read_state()
+        except Exception:
+            self._create_endpoint()
+            return self._read_state()
+
+    def close(self) -> None:
+        self._endpoint = None
+
+    def _create_endpoint(self) -> None:
         from ctypes import POINTER, cast
 
         from comtypes import CLSCTX_ALL
@@ -46,13 +60,10 @@ class PycawVolumeFollower:
         interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
         self._endpoint = cast(interface, POINTER(IAudioEndpointVolume))
 
-    def get_state(self) -> VolumeState:
+    def _read_state(self) -> VolumeState:
         scalar = float(self._endpoint.GetMasterVolumeLevelScalar())
         muted = bool(self._endpoint.GetMute())
-        return VolumeState(scalar, muted, True, "pycaw", "Default render endpoint")
-
-    def close(self) -> None:
-        return None
+        return VolumeState(_clamp_scalar(scalar), muted, True, "pycaw", "Default render endpoint")
 
 
 class _GUID(ctypes.Structure):
@@ -105,6 +116,19 @@ class WindowsEndpointVolumeFollower:
 
     def get_state(self) -> VolumeState:
         try:
+            return self._read_state()
+        except Exception as exc:
+            first_error = str(exc)
+            try:
+                self._release_endpoint_objects()
+                self._create_endpoint()
+                return self._read_state()
+            except Exception as refresh_exc:
+                detail = f"{first_error}; refresh failed: {refresh_exc}"
+                return VolumeState(1.0, False, False, "windows-coreaudio", detail)
+
+    def _read_state(self) -> VolumeState:
+        try:
             scalar = ctypes.c_float()
             muted = ctypes.c_int()
             get_scalar = self._call_endpoint(9, ctypes.HRESULT, ctypes.POINTER(ctypes.c_float))
@@ -120,16 +144,22 @@ class WindowsEndpointVolumeFollower:
             )
             self._check_hr(hr, "IAudioEndpointVolume.GetMute")
             return VolumeState(
-                min(1.0, max(0.0, float(scalar.value))),
+                _clamp_scalar(float(scalar.value)),
                 bool(muted.value),
                 True,
                 "windows-coreaudio",
                 "Default render endpoint",
             )
         except Exception as exc:
-            return VolumeState(1.0, False, False, "windows-coreaudio", str(exc))
+            raise exc
 
     def close(self) -> None:
+        self._release_endpoint_objects()
+        if self._initialized_com:
+            self._ole32.CoUninitialize()
+            self._initialized_com = False
+
+    def _release_endpoint_objects(self) -> None:
         for pointer in (self._endpoint, self._device, self._enumerator):
             if pointer:
                 try:
@@ -139,9 +169,6 @@ class WindowsEndpointVolumeFollower:
         self._endpoint = ctypes.c_void_p()
         self._device = ctypes.c_void_p()
         self._enumerator = ctypes.c_void_p()
-        if self._initialized_com:
-            self._ole32.CoUninitialize()
-            self._initialized_com = False
 
     def _create_endpoint(self) -> None:
         hr = self._ole32.CoCreateInstance(
@@ -219,3 +246,7 @@ def create_volume_follower() -> VolumeFollower:
         return WindowsEndpointVolumeFollower()
     except Exception as exc:
         return NullVolumeFollower(str(exc))
+
+
+def _clamp_scalar(value: float) -> float:
+    return min(1.0, max(0.0, float(value)))

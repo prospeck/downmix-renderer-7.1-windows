@@ -3,47 +3,24 @@ BLOCK_SIZE = 256
 MAX_INPUT_CHANNELS = 16
 OUTPUT_CHANNELS = 2
 DEFAULT_PREAMP_DB = -14
-APP_DISPLAY_NAME = "Taran's 7.1 Renderer Suite"
+APP_DISPLAY_NAME = "Downmix Renderer"
 DEFAULT_CHANNEL_CONFIG = "windows_7_1"
+TRIM_MIN_DB = -24.0
+TRIM_MAX_DB = 0.0
 
-SHARUR_916_CHANNEL_NAMES = (
-    "FL",
-    "FR",
-    "FC",
-    "LFE",
-    "BL",
-    "BR",
-    "BLC",
-    "BRC",
-    "SL",
-    "SR",
-    "TFL",
-    "TFR",
-    "TSL",
-    "TSR",
-    "TBL",
-    "TBR",
-)
+from .layouts import SHARUR_9_1_6_LAYOUT, WINDOWS_7_1_LAYOUT
 
-WINDOWS_71_CHANNEL_NAMES = (
-    "FL",
-    "FR",
-    "FC",
-    "LFE",
-    "BL",
-    "BR",
-    "SL",
-    "SR",
-)
+SHARUR_916_CHANNEL_NAMES = SHARUR_9_1_6_LAYOUT.names
+WINDOWS_71_CHANNEL_NAMES = WINDOWS_7_1_LAYOUT.names
 
 CHANNEL_LAYOUTS = {
     "windows_7_1": {
-        "label": "7.1",
+        "label": WINDOWS_7_1_LAYOUT.label,
         "names": WINDOWS_71_CHANNEL_NAMES,
         "indices": tuple(range(8)),
     },
     "sharur_9_1_6": {
-        "label": "9.1.6 Monitor",
+        "label": SHARUR_9_1_6_LAYOUT.label,
         "names": SHARUR_916_CHANNEL_NAMES,
         "indices": tuple(range(16)),
     },

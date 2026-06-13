@@ -1,63 +1,74 @@
-# Taran's 7.1 Downmix Renderer Suite
+# Downmix Renderer
 
-Premium Windows WASAPI downmix renderer for routing a multichannel VB-CABLE capture endpoint to a stereo DAC. This is a safe working copy; the original renderer is preserved in `reference/renderer_app_original.py`.
+Premium Windows WASAPI downmix renderer for routing a multichannel VB-CABLE capture endpoint to a stereo DAC. The current production package is `Finalised version 3\Downmixrenderer.exe`.
 
 ## Highlights
 
-- OLED-black custom window frame with matching black title bar.
+- OLED-black native-window shell with a dark Windows title bar where available.
 - WASAPI-only device lists to keep routing focused and clean.
+- Shared WASAPI production stream with ULTRA Mode as the default low-latency profile.
 - Sharur matrix preserved exactly from the original app and pinned by tests.
 - Windows volume-key following through CoreAudio endpoint volume.
-- Separate saved Suite Volume and Preamp controls.
+- Saved preamp, route, layout, PEQ, correction, and trim state per profile.
 - User-created preset buttons with create, update, delete, and one-click switching.
 - Runtime smart preset switching when the active Windows output device changes.
-- Optional system boot autostart via a Startup-folder launcher.
+- Manual Refresh Devices action for immediate WASAPI re-enumeration without restarting.
+- ULTRA Mode as the default aggressive shared-WASAPI path, with RAW Mode as the alternate low-latency route.
+- Optional system boot autostart via a Startup-folder launcher that validates the current executable path.
+- Self-healing stream recovery for device invalidation, interruption, and idle-resume silence.
+- Audio-safe UI animation mode that caches the dotted backdrop while rendering to reduce GPU/DWM contention on NVIDIA, Intel, AMD, and CPU-only systems.
+- Independent Raw Monitor window with its own native minimize/close controls.
 - Windows 7.1 channel view using stream order `FL FR FC LFE BL BR SL SR`.
+- Live renderer backend in C++ via a native WASAPI DLL; Python remains the UI/control shell.
 
 ## Quick Start
 
 Run from source:
 
 ```powershell
-cd "C:\Users\taran\Documents\Playground\downmix-renderer-research"
 python renderer_app.py
 ```
 
 Run the packaged app:
 
 ```powershell
-cd "C:\Users\taran\Documents\Playground\downmix-renderer-research"
-.\dist\TaransDownmixRendererSuite.exe
+& ".\Finalised version 3\Downmixrenderer.exe"
 ```
 
 Recommended route:
 
 - Input: `CABLE Output (VB-Audio Virtual Cable)` using `Windows WASAPI`.
 - Output: your DAC/speakers using `Windows WASAPI`.
-- Start with `7.1` channel view for Windows playback.
+- Start with `7.1 Monitor` channel view for Windows playback.
 
 ## Presets
 
 The app starts with zero presets. Create only the presets you actually use:
 
 1. Select the WASAPI input and output.
-2. Set Preamp, Suite Volume, and channel layout.
+2. Set Preamp, channel layout, PEQ, correction, and routing options.
 3. Type a preset name and click `New`; it appears as a button.
 4. Click a preset button to switch instantly.
 5. Click `Update` to overwrite the active preset with the current controls.
 6. Click `Delete` to remove the active preset.
 
-Each preset saves device identities, preamp, Suite Volume, channel layout, and output-device matching hints. Settings are written atomically to avoid partial saves.
+Each preset saves device identities, preamp, channel layout, PEQ/correction state, trim, and output-device matching hints. Settings are written atomically to avoid partial saves.
 
 ## Smart Switching
 
 `Smart preset switching` matches the current Windows WASAPI default output to a saved preset. If you manually click another preset, the app respects that manual choice until Windows reports a different default output device.
 
-`Auto Start Renderer on System Boot` writes a small launcher into the Windows Startup folder. It does not require admin rights.
+`Auto-start on Boot` writes a Windows Startup-folder shortcut. It does not require admin rights. On launch, the app ignores stale shortcuts that point to missing or relocated executables, then recreates the shortcut when you enable boot autostart again.
+
+## Device Refresh And Recovery
+
+Use `Refresh Devices` in the route bar after connecting or waking an output device. The app re-enumerates WASAPI devices immediately, preserves the selected route when possible, and restarts the renderer only when the active route materially changes.
+
+The native backend reports WASAPI stop, reroute, and interruption notifications to the UI shell. If playback resumes after an idle period but the renderer sees input activity with sustained silent output, the current route is restarted automatically.
 
 ## Channel Layouts
 
-Default `7.1` view:
+Default `7.1 Monitor` view:
 
 ```text
 FL FR FC LFE BL BR SL SR
@@ -87,6 +98,9 @@ Truth criteria:
 
 ## Development
 
+For the full implementation reference, see `TECHNICAL_SPECIFICATION.md`.
+For the accepted visual language and interaction rules, see `design.md`.
+
 Run tests:
 
 ```powershell
@@ -96,6 +110,17 @@ python -m unittest discover -s tests
 Build the EXE:
 
 ```powershell
-python scripts\make_icon.py
-pyinstaller --noconfirm renderer_app.spec
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
 ```
+
+The release script rebuilds the native WASAPI DLL, packages the app into
+`Finalised Version` by default, and can optionally sign the EXE/DLL files with `-Sign`.
+For the current production folder, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "Finalised version 3"
+```
+
+The packaged app loads `downmix_renderer\downmix_renderer_native.dll` for the
+production live audio path. Set `DOWNMIX_RENDERER_AUDIO_BACKEND=python` only for
+legacy development comparison tests.
