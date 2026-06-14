@@ -214,7 +214,7 @@ class AudioEngine:
         if self._native_backend is not None:
             for candidate in _profile_start_candidates(requested_profile):
                 try:
-                    blocksize, _ = _stream_settings(candidate)
+                    blocksize, _ = _stream_settings(candidate, sample_rate)
                     self._native_backend.start(input_device, output_device, candidate, blocksize, sample_rate)
                     active_profile = candidate
                     break
@@ -383,7 +383,7 @@ class AudioEngine:
         stream_profile: str,
         sample_rate: int,
     ) -> sd.Stream:
-        blocksize, latency = _stream_settings(stream_profile)
+        blocksize, latency = _stream_settings(stream_profile, sample_rate)
         return sd.Stream(
             samplerate=sample_rate,
             blocksize=blocksize,
@@ -438,13 +438,24 @@ def _resolve_sample_rate(
     return resolve_sample_rate(sample_rate_mode, input_device, output_device)
 
 
-def _stream_settings(stream_profile: str) -> tuple[int, str]:
+def _scaled_stream_block_size(base_block_size: int, sample_rate: int) -> int:
+    try:
+        rate = int(sample_rate)
+    except (TypeError, ValueError):
+        rate = SAMPLE_RATE
+    if rate <= SAMPLE_RATE:
+        return int(base_block_size)
+    scaled = int(round(base_block_size * (rate / SAMPLE_RATE)))
+    return max(64, min(4096, scaled))
+
+
+def _stream_settings(stream_profile: str, sample_rate: int = SAMPLE_RATE) -> tuple[int, str]:
     stream_profile = _normalize_stream_profile(stream_profile)
     if stream_profile == "ultra":
-        return ULTRA_BLOCK_SIZE, "low"
+        return _scaled_stream_block_size(ULTRA_BLOCK_SIZE, sample_rate), "low"
     if stream_profile == "raw":
-        return LOW_LATENCY_BLOCK_SIZE, "low"
-    return ULTRA_BLOCK_SIZE, "low"
+        return _scaled_stream_block_size(LOW_LATENCY_BLOCK_SIZE, sample_rate), "low"
+    return _scaled_stream_block_size(ULTRA_BLOCK_SIZE, sample_rate), "low"
 
 
 def _safe_close_stream(stream: sd.Stream) -> None:

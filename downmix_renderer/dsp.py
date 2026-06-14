@@ -49,6 +49,12 @@ _UPMIX_DECORRELATION_COEFFS = (
 _UPMIX_FILTER_SLOTS = 24
 PEQ_CROSSFADE_SAMPLES = 128
 PEQ_DENORMAL_GUARD = 1e-30
+SOUND_ENHANCER_MAKEUP_DB = 7.5
+SOUND_ENHANCER_CEILING_DB = -1.0
+SOUND_ENHANCER_MAKEUP_GAIN = 10 ** (SOUND_ENHANCER_MAKEUP_DB / 20.0)
+SOUND_ENHANCER_CEILING = 10 ** (SOUND_ENHANCER_CEILING_DB / 20.0)
+SOUND_ENHANCER_ATTACK_ALPHA = 0.85
+SOUND_ENHANCER_RELEASE_ALPHA = 0.08
 
 
 def db_to_linear(db_value: float) -> float:
@@ -150,6 +156,8 @@ class DspSnapshot:
     upmix_9_1_6_active: bool
     channel_sanity_enabled: bool
     channel_sanity_active: bool
+    sound_enhancer_enabled: bool
+    sound_enhancer_gain: float
 
     @property
     def active_channel_count(self) -> int:
@@ -199,6 +207,9 @@ class DownmixProcessor:
         self._upmix_9_1_6_enabled = False
         self._channel_sanity_enabled = False
         self._limiter_gain = 1.0
+        self._sound_enhancer_enabled = False
+        self._sound_enhancer_safety_gain = 1.0
+        self._sound_enhancer_applied_gain = 1.0
 
         self._scratch_frames = 0
         self._input16 = np.zeros((0, max_channels), dtype=np.float32)
@@ -294,6 +305,12 @@ class DownmixProcessor:
         with self._config_lock:
             self._channel_sanity_enabled = bool(enabled)
 
+    def set_sound_enhancer_enabled(self, enabled: bool) -> None:
+        with self._config_lock:
+            self._sound_enhancer_enabled = bool(enabled)
+            self._sound_enhancer_safety_gain = 1.0
+            self._sound_enhancer_applied_gain = 1.0
+
     def set_peq_config(self, config: PeqRuntimeConfig) -> None:
         if not isinstance(config, PeqRuntimeConfig):
             raise TypeError("config must be a PeqRuntimeConfig")
@@ -322,6 +339,8 @@ class DownmixProcessor:
         self._hp_x1.fill(0.0)
         self._hp_y1.fill(0.0)
         self._lp_y1.fill(0.0)
+        self._sound_enhancer_safety_gain = 1.0
+        self._sound_enhancer_applied_gain = 1.0
         self._peq_state = self._new_peq_state()
         self._peq_transition_state = self._new_peq_state()
         self._peq_transition_config = None
@@ -379,17 +398,24 @@ class DownmixProcessor:
             surround_fill_enabled = self._surround_fill_enabled
             upmix_9_1_6_enabled = self._upmix_9_1_6_enabled
             channel_sanity_enabled = self._channel_sanity_enabled
+            sound_enhancer_enabled = self._sound_enhancer_enabled
 
+        sound_enhancer_limited = False
+        sound_enhancer_gain = 1.0
         self._mix_to_stereo(processed16, frames, matrix)
         self._stereo[:frames] *= preamp_gain
         self._apply_peq_routing(frames)
         if trim_left_gain != 1.0 or trim_right_gain != 1.0:
             self._stereo[:frames, 0] *= trim_left_gain
             self._stereo[:frames, 1] *= trim_right_gain
+        if sound_enhancer_enabled:
+            sound_enhancer_gain, sound_enhancer_limited = self._apply_sound_enhancer(frames)
+        else:
+            self._sound_enhancer_applied_gain = 1.0
 
         peak_before_limiter = self._peak_stereo(self._stereo[:frames], frames)
         target_gain = 1.0
-        clipping = False
+        clipping = sound_enhancer_limited
         if peak_before_limiter > 1.0:
             target_gain = 1.0 / peak_before_limiter
             clipping = True
@@ -439,6 +465,8 @@ class DownmixProcessor:
                 self._snapshot_surround_fill_enabled = surround_fill_enabled
                 self._snapshot_upmix_9_1_6_enabled = upmix_9_1_6_enabled
                 self._snapshot_channel_sanity_enabled = channel_sanity_enabled
+                self._snapshot_sound_enhancer_enabled = sound_enhancer_enabled
+                self._snapshot_sound_enhancer_gain = sound_enhancer_gain
             finally:
                 self._state_lock.release()
 
@@ -461,6 +489,12 @@ class DownmixProcessor:
             channel_sanity_enabled = getattr(
                 self, "_snapshot_channel_sanity_enabled", self._channel_sanity_enabled
             )
+            sound_enhancer_enabled = getattr(
+                self, "_snapshot_sound_enhancer_enabled", self._sound_enhancer_enabled
+            )
+            sound_enhancer_gain = getattr(
+                self, "_snapshot_sound_enhancer_gain", self._sound_enhancer_applied_gain
+            )
             return DspSnapshot(
                 channel_levels=self._channel_levels.copy(),
                 channel_rms=self._channel_rms.copy(),
@@ -482,6 +516,8 @@ class DownmixProcessor:
                 upmix_9_1_6_active=bool(self._upmix_9_1_6_active),
                 channel_sanity_enabled=bool(channel_sanity_enabled),
                 channel_sanity_active=bool(self._channel_sanity_active),
+                sound_enhancer_enabled=bool(sound_enhancer_enabled),
+                sound_enhancer_gain=float(sound_enhancer_gain),
             )
 
     def _ensure_scratch(self, frames: int) -> None:
@@ -555,6 +591,52 @@ class DownmixProcessor:
         stereo_abs = self._stereo_abs[:frames]
         np.abs(samples, out=stereo_abs)
         return float(np.max(stereo_abs))
+
+    def _apply_sound_enhancer(self, frames: int) -> tuple[float, bool]:
+        """Apply transparent laptop-speaker loudness with a protected ceiling.
+
+        The enhancer is intentionally post-mix and pre-final-limiter: it does
+        not change matrix/downmix math, PEQ, trims, routing, or channel state.
+        It adds fixed makeup gain for quiet laptop speakers, then uses a fast
+        safety gain to keep the boosted block under a -1 dBFS ceiling before
+        the existing full-scale limiter gets a final chance to catch anomalies.
+        """
+        if not frames:
+            self._sound_enhancer_applied_gain = 1.0
+            return 1.0, False
+
+        peak = self._peak_stereo(self._stereo[:frames], frames)
+        target_safety_gain = 1.0
+        limited = False
+        if peak > 1e-12:
+            boosted_peak = peak * SOUND_ENHANCER_MAKEUP_GAIN
+            if boosted_peak > SOUND_ENHANCER_CEILING:
+                target_safety_gain = SOUND_ENHANCER_CEILING / boosted_peak
+                limited = True
+
+        alpha = (
+            SOUND_ENHANCER_ATTACK_ALPHA
+            if target_safety_gain < self._sound_enhancer_safety_gain
+            else SOUND_ENHANCER_RELEASE_ALPHA
+        )
+        smoothed_safety_gain = (
+            (1.0 - alpha) * self._sound_enhancer_safety_gain
+        ) + (alpha * target_safety_gain)
+        applied_safety_gain = min(smoothed_safety_gain, target_safety_gain) if limited else smoothed_safety_gain
+        self._sound_enhancer_safety_gain = smoothed_safety_gain
+
+        applied_gain = SOUND_ENHANCER_MAKEUP_GAIN * applied_safety_gain
+        self._stereo[:frames] *= applied_gain
+
+        post_peak = self._peak_stereo(self._stereo[:frames], frames)
+        if post_peak > SOUND_ENHANCER_CEILING:
+            emergency_gain = SOUND_ENHANCER_CEILING / post_peak
+            self._stereo[:frames] *= emergency_gain
+            applied_gain *= emergency_gain
+            limited = True
+
+        self._sound_enhancer_applied_gain = applied_gain
+        return applied_gain, limited
 
     def _mix_to_stereo(self, processed16: np.ndarray, frames: int, matrix: np.ndarray) -> None:
         stereo = self._stereo[:frames]

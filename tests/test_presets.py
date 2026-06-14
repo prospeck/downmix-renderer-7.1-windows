@@ -89,6 +89,7 @@ class PresetTests(unittest.TestCase):
         self.assertFalse(loaded[0].surround_fill_enabled)
         self.assertFalse(loaded[0].upmix_9_1_6_enabled)
         self.assertFalse(loaded[0].channel_sanity_enabled)
+        self.assertFalse(loaded[0].sound_enhancer_enabled)
         self.assertEqual(loaded[0].audio_stability, "ultra")
         self.assertFalse(loaded[0].lr_swap_enabled)
         self.assertFalse(loaded[0].global_peq_enabled)
@@ -150,6 +151,26 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(loaded[0].trim_left_db, 0.0)
         self.assertEqual(loaded[0].trim_right_db, 0.0)
 
+    def test_sound_enhancer_state_is_serialized(self) -> None:
+        preset = preset_from_current(
+            "Laptop",
+            fake_input(),
+            fake_output(),
+            -8,
+            1.0,
+            "sharur_9_1_6",
+            sound_enhancer_enabled=True,
+        )
+
+        payload = preset.to_dict()
+        loaded = load_presets(
+            {"preset_schema_version": PRESET_SCHEMA_VERSION, "presets": [payload]},
+            [fake_input(), fake_output()],
+        )
+
+        self.assertIs(payload["sound_enhancer_enabled"], True)
+        self.assertTrue(loaded[0].sound_enhancer_enabled)
+
     def test_update_overwrites_all_audio_parameters(self) -> None:
         preset = preset_from_current("Daily", fake_input(), fake_output(), -14, 1.0, "windows_7_1")
         update_preset_from_current(
@@ -162,6 +183,7 @@ class PresetTests(unittest.TestCase):
             surround_fill_enabled=False,
             upmix_9_1_6_enabled=True,
             channel_sanity_enabled=False,
+            sound_enhancer_enabled=True,
             audio_stability="low_latency",
             lr_swap_enabled=True,
             global_peq_enabled=True,
@@ -178,6 +200,7 @@ class PresetTests(unittest.TestCase):
         self.assertFalse(preset.surround_fill_enabled)
         self.assertTrue(preset.upmix_9_1_6_enabled)
         self.assertFalse(preset.channel_sanity_enabled)
+        self.assertTrue(preset.sound_enhancer_enabled)
         self.assertEqual(preset.audio_stability, "raw")
         self.assertIn("Realtek", str(preset.output_device))
         self.assertTrue(preset.lr_swap_enabled)

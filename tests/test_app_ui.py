@@ -286,6 +286,7 @@ class AppUiTests(unittest.TestCase):
         self.assertIsNotNone(window.smart_switch_checkbox)
         self.assertIsNotNone(window.surround_fill_checkbox)
         self.assertIsNotNone(window.upmix916_checkbox)
+        self.assertIsNotNone(window.sound_enhancer_checkbox)
         self.assertIsNotNone(window.keep_awake_checkbox)
         self.assertIsNotNone(window.sample_rate_combo)
         self.assertEqual(
@@ -297,6 +298,7 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(window.info_button.text(), "")
         self.assertEqual(window.info_button.toolTip(), "Renderer details")
         self.assertEqual(window.surround_fill_checkbox.text(), "7.1 Upmix")
+        self.assertEqual(window.sound_enhancer_checkbox.text(), "Sound Enhancer")
         self.assertFalse(hasattr(window, "route_probe_button"))
         self.assertFalse(hasattr(window, "stability_combo"))
         self.assertFalse(hasattr(window, "channel_sanity_checkbox"))
@@ -349,16 +351,42 @@ class AppUiTests(unittest.TestCase):
         self.assertIs(saved[-1]["channel_sanity_enabled"], False)
         self.assertEqual(saved[-1]["audio_stability"], "ultra")
 
+    def test_sound_enhancer_defaults_off_loads_and_persists_as_named_setting(self) -> None:
+        saved: list[dict[str, object]] = []
+        window = self.make_window(
+            {
+                "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                "sound_enhancer_enabled": True,
+            },
+            saved,
+        )
+
+        self.assertTrue(window.sound_enhancer_checkbox.isChecked())
+        self.assertTrue(window.engine.processor.snapshot().sound_enhancer_enabled)
+
+        window.sound_enhancer_checkbox.setChecked(False)
+        self.app.processEvents()
+
+        self.assertTrue(saved)
+        self.assertIs(saved[-1]["sound_enhancer_enabled"], False)
+        self.assertFalse(window.engine.processor.snapshot().sound_enhancer_enabled)
+
     def test_keep_output_awake_card_uses_compact_header_layout(self) -> None:
         window = self.make_window()
 
         card = window.findChild(QtWidgets.QFrame, "keepAwakeCard")
+        helper = window.findChild(QtWidgets.QLabel, "keepAwakeHelper")
+        helper_shell = window.findChild(QtWidgets.QWidget, "keepAwakeHelperShell")
 
         self.assertIsNotNone(card)
+        self.assertIsNotNone(helper)
+        self.assertIsNotNone(helper_shell)
         self.assertEqual(window.keep_awake_checkbox.text(), "Keep output awake")
-        self.assertEqual(window.keep_awake_checkbox.minimumHeight(), 30)
-        self.assertEqual(card.minimumHeight(), 86)
-        self.assertEqual(card.maximumHeight(), 96)
+        self.assertEqual(window.keep_awake_checkbox.minimumHeight(), 28)
+        self.assertLessEqual(card.layout().spacing(), 3)
+        self.assertEqual(helper_shell.layout().contentsMargins().left(), 0)
+        self.assertLessEqual(card.minimumHeight(), 78)
+        self.assertLessEqual(card.maximumHeight(), 84)
 
     def test_sample_rate_selector_persists_manual_mode(self) -> None:
         saved: list[dict[str, object]] = []
@@ -408,12 +436,85 @@ class AppUiTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertTrue(window.sample_rate_combo.isVisible())
-        self.assertGreaterEqual(window.sample_rate_combo.width(), 124)
-        self.assertLessEqual(window.sample_rate_combo.width(), 144)
+        self.assertGreaterEqual(window.sample_rate_combo.width(), 94)
+        self.assertLessEqual(window.sample_rate_combo.width(), 104)
+        self.assertEqual(window.refresh_devices_button.text(), "")
+        self.assertFalse(window.refresh_devices_button.icon().isNull())
+        self.assertLessEqual(window.refresh_devices_button.width(), 50)
         self.assertEqual(
             [window.sample_rate_combo.itemText(index) for index in range(window.sample_rate_combo.count())],
             ["Auto", "48 kHz", "96 kHz", "192 kHz"],
         )
+
+    def test_route_selector_surface_uses_card_tones_without_glass_sheen(self) -> None:
+        def style_block(marker: str) -> str:
+            start = BASE_STYLE.index(marker)
+            end = BASE_STYLE.find("\nQ", start + 1)
+            return BASE_STYLE[start:] if end == -1 else BASE_STYLE[start:end]
+
+        route_style = "\n".join(
+            style_block(marker)
+            for marker in (
+                "QFrame#routeLane {",
+                "QFrame#routeSegment {",
+                "QFrame#routeSegment:hover",
+            )
+        )
+
+        self.assertNotIn("qlineargradient", route_style)
+        self.assertNotIn("rgba(255, 255, 255", route_style)
+        self.assertIn("background-color: #030303;", route_style)
+        self.assertIn("border: 1px solid #1d1d1d;", route_style)
+
+    def test_refresh_button_uses_clear_icon_and_fast_press_animation(self) -> None:
+        window = self.make_window()
+        button = window.refresh_devices_button
+
+        self.assertEqual(button.__class__.__name__, "RouteRefreshButton")
+        self.assertTrue(getattr(button, "has_premium_refresh_animation", False))
+        self.assertGreaterEqual(getattr(button, "refresh_icon_stroke_width", 0.0), 2.2)
+        self.assertGreaterEqual(getattr(button, "refresh_icon_gap_degrees", 0), 76)
+        self.assertGreaterEqual(getattr(button, "refresh_icon_arrow_size", 0.0), 5.8)
+        self.assertEqual(getattr(button, "refresh_arrow_direction", ""), "clockwise_upper_right")
+        self.assertEqual(getattr(button, "refresh_arrow_head_style", ""), "line_chevron")
+        self.assertGreaterEqual(getattr(button, "refresh_arrow_tip_angle_degrees", 0), 28)
+        self.assertLessEqual(getattr(button, "refresh_arrow_tip_angle_degrees", 99), 40)
+        self.assertLess(getattr(button, "refresh_arrow_tip_y_ratio", 1.0), 0.0)
+        self.assertLessEqual(getattr(button, "refresh_icon_radius", 99.0), 7.0)
+        self.assertGreaterEqual(getattr(button, "refresh_icon_arc_sweep_degrees", 0.0), 276.0)
+        self.assertEqual(getattr(button, "refresh_spin_degrees", 0), 360)
+        self.assertFalse(getattr(button, "uses_refresh_pulse", True))
+        self.assertTrue(getattr(button, "uses_refresh_animation_group", False))
+        self.assertTrue(getattr(button, "refresh_press_feedback_enabled", False))
+        self.assertTrue(getattr(button, "uses_refresh_wheel_morph", False))
+        self.assertEqual(getattr(button, "refresh_wheel_morph_peak", 0.0), 0.5)
+        self.assertGreaterEqual(getattr(button, "refresh_wheel_hold_start", 1.0), 0.30)
+        self.assertLessEqual(getattr(button, "refresh_wheel_hold_end", 0.0), 0.70)
+        self.assertEqual(getattr(button, "refresh_wheel_accent_color", ""), "#45d88f")
+        self.assertTrue(getattr(button, "refresh_wheel_tint_follows_morph", False))
+        self.assertEqual(getattr(button, "refresh_easing_curve_name", ""), "OutCubic")
+        self.assertGreaterEqual(getattr(button, "REFRESH_ANIMATION_MS", 0), 280)
+        self.assertLessEqual(getattr(button, "REFRESH_ANIMATION_MS", 999), 340)
+
+        button.animate_refresh()
+        self.app.processEvents()
+
+        self.assertGreater(button.refresh_progress, 0.0)
+        self.assertGreater(button.refresh_press_depth, 0.0)
+        button.refreshProgress = 0.5
+        self.assertGreater(button.refresh_wheel_morph, 0.95)
+        self.assertEqual(button.refresh_glyph_color().name(), "#45d88f")
+        button.refreshProgress = 0.66
+        self.assertGreater(button.refresh_wheel_morph, 0.95)
+        button.refreshProgress = 1.0
+        self.assertLess(button.refresh_wheel_morph, 0.05)
+        self.assertEqual(button.refresh_glyph_color().name(), "#f0f4f3")
+        self.assertEqual(button.text(), "")
+        self.assertFalse(button.icon().isNull())
+        button.cancel_refresh_animation()
+        self.app.processEvents()
+        self.assertEqual(button.refresh_progress, 0.0)
+        self.assertEqual(button.refresh_press_depth, 0.0)
 
     def test_route_dropdown_popups_use_themed_route_views(self) -> None:
         window = self.make_window()
@@ -442,13 +543,26 @@ class AppUiTests(unittest.TestCase):
         widths = {label.width() for label in labels.values()}
         tops = [label.mapTo(window, QtCore.QPoint(0, 0)).y() for label in labels.values()]
         centers = [label.mapTo(window, QtCore.QPoint(0, label.height() // 2)).y() for label in labels.values()]
+        route_lane = window.findChild(QtWidgets.QFrame, "routeLane")
+        self.assertIsNotNone(route_lane)
+        route_layout = route_lane.layout()
+        route_order: list[str] = []
+        for index in range(route_layout.count()):
+            widget = route_layout.itemAt(index).widget()
+            if widget is window.refresh_devices_button:
+                route_order.append("Refresh devices")
+                continue
+            label = widget.findChild(QtWidgets.QLabel, "routeEyebrow") if widget is not None else None
+            if label is not None:
+                route_order.append(label.text())
 
         self.assertEqual(widths, {88})
+        self.assertEqual(route_order, ["Input device", "Output device", "Sample rate", "Refresh devices"])
         self.assertLessEqual(max(tops) - min(tops), 1)
         self.assertLessEqual(max(centers) - min(centers), 1)
-        self.assertGreaterEqual(window.sample_rate_combo.width(), 124)
-        self.assertLessEqual(window.sample_rate_combo.width(), 144)
-        self.assertGreater(window.output_combo.width(), window.sample_rate_combo.width())
+        self.assertGreaterEqual(window.sample_rate_combo.width(), 94)
+        self.assertLessEqual(window.sample_rate_combo.width(), 104)
+        self.assertGreater(window.output_combo.width(), window.sample_rate_combo.width() * 2)
 
     def test_route_dropdowns_show_available_items_without_scroll_spacing(self) -> None:
         devices = [fake_input(), fake_output(), fake_usb_output()]
@@ -952,6 +1066,7 @@ class AppUiTests(unittest.TestCase):
             window.system_boot_checkbox,
             window.surround_fill_checkbox,
             window.upmix916_checkbox,
+            window.sound_enhancer_checkbox,
             window.keep_awake_checkbox,
         ):
             self.assertIsInstance(checkbox, SwitchCheckBox)
@@ -987,9 +1102,9 @@ class AppUiTests(unittest.TestCase):
         self.assertNotIn("rgba(111, 240, 160, 28)", BASE_STYLE)
         self.assertIn("background-color: #030303;", BASE_STYLE)
         self.assertIn("border: 1px solid #1d1d1d;", BASE_STYLE)
-        self.assertIn("stop:0 rgba(2, 2, 2, 228)", BASE_STYLE)
-        self.assertIn("border: 1px solid rgba(255, 255, 255, 24);", BASE_STYLE)
         self.assertIn("QFrame#routeLane", BASE_STYLE)
+        self.assertIn("QFrame#routeSegment", BASE_STYLE)
+        self.assertIn("border-color: #363636;", BASE_STYLE)
         self.assertIn("QFrame#card:hover", BASE_STYLE)
 
     def test_raw_monitor_uses_premium_dialog(self) -> None:
@@ -1000,6 +1115,15 @@ class AppUiTests(unittest.TestCase):
 
         self.assertEqual(dialog.windowTitle(), "Raw 16ch Monitor")
         self.assertEqual(len(dialog.tiles), 16)
+
+    def test_raw_monitor_tiles_match_9_1_6_channel_field_mapping(self) -> None:
+        window = self.make_window()
+        window.set_channel_config("sharur_9_1_6")
+        dialog = RawMonitorDialog(window)
+        self.addCleanup(dialog.deleteLater)
+
+        self.assertEqual([tile.name for tile in dialog.tiles], [tile.name for tile in window.tiles])
+        self.assertEqual([tile.source_index for tile in dialog.tiles], [tile.source_index for tile in window.tiles])
 
     def test_opened_raw_monitor_is_not_owned_by_main_window(self) -> None:
         window = self.make_window()

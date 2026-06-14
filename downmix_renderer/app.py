@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import sys
 from pathlib import Path
 from time import monotonic
@@ -12,11 +11,9 @@ from PyQt5 import QtCore, QtGui, QtSvg, QtWidgets
 from .audio_engine import DEFAULT_STREAM_PROFILE, STREAM_PROFILES, AudioEngine
 from .constants import (
     APP_DISPLAY_NAME,
-    BLOCK_SIZE,
     CHANNEL_LAYOUTS,
     DEFAULT_CHANNEL_CONFIG,
     DEFAULT_PREAMP_DB,
-    SAMPLE_RATE,
     TRIM_MAX_DB,
     TRIM_MIN_DB,
 )
@@ -147,6 +144,12 @@ QLabel#subtitle {{
     font-size: 11px;
     font-weight: 500;
 }}
+QLabel#keepAwakeHelper {{
+    color: #828986;
+    font-size: 11px;
+    font-weight: 520;
+    background-color: transparent;
+}}
 QLabel#heroStatus {{
     color: {MID};
     font-size: 11px;
@@ -210,32 +213,21 @@ QFrame#keepAwakeCard {{
     border-radius: 8px;
 }}
 QFrame#routeLane {{
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(2, 2, 2, 228),
-        stop:0.22 rgba(11, 11, 11, 210),
-        stop:0.52 rgba(5, 5, 5, 218),
-        stop:0.80 rgba(9, 9, 9, 210),
-        stop:1 rgba(1, 1, 1, 232));
-    border: 1px solid rgba(255, 255, 255, 24);
+    background-color: #030303;
+    border: 1px solid #1d1d1d;
     border-radius: 12px;
 }}
 QWidget#routeColumn {{
     background-color: transparent;
 }}
 QFrame#routeSegment {{
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(3, 3, 3, 206),
-        stop:0.42 rgba(14, 14, 14, 188),
-        stop:1 rgba(4, 4, 4, 210));
-    border: 1px solid rgba(255, 255, 255, 32);
+    background-color: #050505;
+    border: 1px solid #252525;
     border-radius: 10px;
 }}
 QFrame#routeSegment:hover {{
-    border-color: rgba(255, 255, 255, 70);
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 rgba(7, 7, 7, 218),
-        stop:0.46 rgba(20, 20, 20, 196),
-        stop:1 rgba(6, 6, 6, 222));
+    border-color: #363636;
+    background-color: #070707;
 }}
 QFrame#card[presetSurface="true"] {{
     background-color: rgba(5, 5, 5, 210);
@@ -492,22 +484,20 @@ QPushButton#rawMonitor:pressed {{
 }}
 QPushButton#routeRefresh {{
     color: {TEXT};
-    background-color: rgba(4, 4, 4, 210);
-    border: 1px solid rgba(255, 255, 255, 34);
+    background-color: #050505;
+    border: 1px solid #252525;
     border-radius: 10px;
     min-height: 42px;
     max-height: 42px;
-    padding: 0px 13px;
-    font-size: 11px;
-    font-weight: 680;
+    padding: 0px;
 }}
 QPushButton#routeRefresh:hover {{
-    border-color: rgba(255, 255, 255, 78);
-    background-color: rgba(10, 10, 10, 226);
+    border-color: #454545;
+    background-color: #090909;
 }}
 QPushButton#routeRefresh:pressed {{
-    border-color: rgba(255, 255, 255, 160);
-    background-color: rgba(16, 16, 16, 235);
+    border-color: #6a6a6a;
+    background-color: #101010;
 }}
 QPushButton#peqAction {{
     color: {TEXT};
@@ -715,6 +705,220 @@ def value_label(text: str = "--") -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
     label.setObjectName("value")
     return label
+
+
+def _draw_refresh_glyph(
+    painter: QtGui.QPainter,
+    center: QtCore.QPointF,
+    radius: float,
+    color: QtGui.QColor,
+    stroke_width: float,
+    rotation_degrees: float = 0.0,
+    wheel_morph: float = 0.0,
+) -> None:
+    wheel_morph = max(0.0, min(1.0, float(wheel_morph)))
+    painter.save()
+    painter.translate(center)
+    if rotation_degrees:
+        painter.rotate(rotation_degrees)
+    pen = QtGui.QPen(color, stroke_width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(QtCore.Qt.NoBrush)
+    if wheel_morph >= 0.985:
+        painter.drawEllipse(QtCore.QRectF(-radius, -radius, radius * 2.0, radius * 2.0))
+    else:
+        sweep = RouteRefreshButton.refresh_icon_arc_sweep_degrees + (
+            (354.0 - RouteRefreshButton.refresh_icon_arc_sweep_degrees) * wheel_morph
+        )
+        painter.drawArc(QtCore.QRectF(-radius, -radius, radius * 2.0, radius * 2.0), 32 * 16, int(sweep * 16))
+
+    arrow_alpha = int(color.alpha() * max(0.0, 1.0 - (wheel_morph * 1.35)))
+    if arrow_alpha > 8:
+        arrow_color = QtGui.QColor(color)
+        arrow_color.setAlpha(arrow_alpha)
+        painter.setPen(QtGui.QPen(arrow_color, stroke_width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        tip = QtCore.QPointF(radius * 0.98, radius * -0.58)
+        trailing_wing = QtCore.QPointF(radius * 0.34, radius * -0.56)
+        upper_wing = QtCore.QPointF(radius * 0.69, radius * -1.10)
+        painter.drawLine(tip, trailing_wing)
+        painter.drawLine(tip, upper_wing)
+    painter.restore()
+
+
+def refresh_icon(size: int = 22) -> QtGui.QIcon:
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    _draw_refresh_glyph(
+        painter,
+        QtCore.QPointF(size / 2.0, size / 2.0),
+        size * 0.305,
+        QtGui.QColor("#f7fbfa"),
+        2.3,
+    )
+    painter.end()
+    return QtGui.QIcon(pixmap)
+
+
+class RouteRefreshButton(QtWidgets.QPushButton):
+    REFRESH_ANIMATION_MS = 315
+    has_premium_refresh_animation = True
+    refresh_icon_stroke_width = 2.3
+    refresh_icon_gap_degrees = 100
+    refresh_icon_arrow_size = 6.2
+    refresh_arrow_direction = "clockwise_upper_right"
+    refresh_arrow_head_style = "line_chevron"
+    refresh_arrow_tip_angle_degrees = 34
+    refresh_arrow_tip_y_ratio = -0.58
+    refresh_icon_radius = 6.85
+    refresh_icon_arc_sweep_degrees = 282.0
+    refresh_spin_degrees = 360
+    uses_refresh_pulse = False
+    uses_refresh_animation_group = True
+    refresh_press_feedback_enabled = True
+    uses_refresh_wheel_morph = True
+    refresh_wheel_morph_peak = 0.5
+    refresh_wheel_hold_start = 0.34
+    refresh_wheel_hold_end = 0.66
+    refresh_wheel_accent_color = "#45d88f"
+    refresh_wheel_tint_follows_morph = True
+    refresh_easing_curve_name = "OutCubic"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("routeRefresh")
+        self.setToolTip("Refresh devices")
+        self.setAccessibleName("Refresh devices")
+        self.setIcon(refresh_icon(24))
+        self.setIconSize(QtCore.QSize(20, 20))
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
+        self._refresh_progress = 0.0
+        self._refresh_press_depth = 0.0
+        self._refresh_animation_group = QtCore.QParallelAnimationGroup(self)
+        self._refresh_animation = QtCore.QPropertyAnimation(self, b"refreshProgress", self._refresh_animation_group)
+        self._refresh_animation.setDuration(self.REFRESH_ANIMATION_MS)
+        self._refresh_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._refresh_press_animation = QtCore.QPropertyAnimation(self, b"refreshPressDepth", self._refresh_animation_group)
+        self._refresh_press_animation.setDuration(118)
+        self._refresh_press_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._refresh_animation_group.addAnimation(self._refresh_animation)
+        self._refresh_animation_group.addAnimation(self._refresh_press_animation)
+        self._refresh_animation_group.finished.connect(self._finish_refresh_animation)
+        self.pressed.connect(self.animate_refresh)
+
+    @property
+    def refresh_progress(self) -> float:
+        return self._refresh_progress
+
+    def _set_refresh_progress(self, value: float) -> None:
+        self._refresh_progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    refreshProgress = QtCore.pyqtProperty(float, fget=lambda self: self._refresh_progress, fset=_set_refresh_progress)
+
+    @property
+    def refresh_wheel_morph(self) -> float:
+        progress = self._refresh_progress
+        if progress <= 0.0001 or progress >= 0.9999:
+            return 0.0
+        if progress <= self.refresh_wheel_hold_start:
+            t = progress / self.refresh_wheel_hold_start
+            return t * t * (3.0 - (2.0 * t))
+        if progress <= self.refresh_wheel_hold_end:
+            return 1.0
+        t = (progress - self.refresh_wheel_hold_end) / (1.0 - self.refresh_wheel_hold_end)
+        return max(0.0, 1.0 - (t * t * (3.0 - (2.0 * t))))
+
+    def refresh_glyph_color(self) -> QtGui.QColor:
+        base = QtGui.QColor("#ffffff" if self.underMouse() or self.hasFocus() or self.isDown() else "#f0f4f3")
+        accent = QtGui.QColor(self.refresh_wheel_accent_color)
+        t = self.refresh_wheel_morph
+        if t <= 0.0:
+            return base
+        return QtGui.QColor(
+            int(base.red() + ((accent.red() - base.red()) * t)),
+            int(base.green() + ((accent.green() - base.green()) * t)),
+            int(base.blue() + ((accent.blue() - base.blue()) * t)),
+            255,
+        )
+
+    @property
+    def refresh_press_depth(self) -> float:
+        return self._refresh_press_depth
+
+    def _set_refresh_press_depth(self, value: float) -> None:
+        self._refresh_press_depth = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    refreshPressDepth = QtCore.pyqtProperty(
+        float,
+        fget=lambda self: self._refresh_press_depth,
+        fset=_set_refresh_press_depth,
+    )
+
+    def animate_refresh(self) -> None:
+        if self._refresh_animation_group.state() == QtCore.QAbstractAnimation.Running:
+            self._refresh_animation_group.stop()
+        self._set_refresh_progress(0.0)
+        self._set_refresh_press_depth(0.0)
+        self._refresh_animation.setStartValue(self._refresh_progress)
+        self._refresh_animation.setEndValue(1.0)
+        self._refresh_press_animation.setStartValue(0.0)
+        self._refresh_press_animation.setKeyValueAt(0.42, 1.0)
+        self._refresh_press_animation.setEndValue(0.0)
+        self._refresh_animation_group.start()
+        self._refresh_animation_group.setCurrentTime(1)
+
+    def cancel_refresh_animation(self) -> None:
+        if self._refresh_animation_group.state() == QtCore.QAbstractAnimation.Running:
+            self._refresh_animation_group.stop()
+        self._finish_refresh_animation()
+
+    def _finish_refresh_animation(self) -> None:
+        self._set_refresh_progress(0.0)
+        self._set_refresh_press_depth(0.0)
+
+    def hideEvent(self, event) -> None:
+        self.cancel_refresh_animation()
+        super().hideEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        hover = self.underMouse() or self.hasFocus()
+        active = self.isDown() or self._refresh_progress > 0.01
+
+        bg = QtGui.QColor("#101010" if self.isDown() else ("#090909" if hover or active else "#050505"))
+        border = QtGui.QColor("#6a6a6a" if self.isDown() else ("#4a4a4a" if hover or active else "#252525"))
+        painter.setPen(QtGui.QPen(border, 1.0))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 10, 10)
+
+        press = math.sin(math.pi * self._refresh_press_depth)
+        center = rect.center() + QtCore.QPointF(0.0, 0.45 * press)
+        icon_color = self.refresh_glyph_color()
+        painter.save()
+        if press > 0.0:
+            painter.translate(rect.center())
+            scale = 1.0 - (0.035 * press)
+            painter.scale(scale, scale)
+            painter.translate(-rect.center())
+        _draw_refresh_glyph(
+            painter,
+            center,
+            self.refresh_icon_radius,
+            icon_color,
+            self.refresh_icon_stroke_width,
+            -self.refresh_spin_degrees * self._refresh_progress,
+            self.refresh_wheel_morph,
+        )
+        painter.restore()
+        painter.end()
 
 
 class RouteValueLabel(QtWidgets.QLabel):
@@ -2453,12 +2657,14 @@ class RendererWindow(QtWidgets.QWidget):
         self.surround_fill_enabled = self._audio_recovery_bool("surround_fill_enabled", False)
         self.upmix_9_1_6_enabled = self._audio_recovery_bool("upmix_9_1_6_enabled", False)
         self.channel_sanity_enabled = False
+        self.sound_enhancer_enabled = self._audio_recovery_bool("sound_enhancer_enabled", False)
         self.audio_stability = DEFAULT_STREAM_PROFILE
         self.keep_output_awake_enabled = bool(self.settings.get("keep_output_awake", False))
         self.sample_rate_mode = normalize_sample_rate_mode(self.settings.get("sample_rate_mode", DEFAULT_SAMPLE_RATE_MODE))
         self.engine.processor.set_surround_fill_enabled(self.surround_fill_enabled)
         self.engine.processor.set_upmix_9_1_6_enabled(self.upmix_9_1_6_enabled)
         self.engine.processor.set_channel_sanity_enabled(False)
+        self.engine.processor.set_sound_enhancer_enabled(self.sound_enhancer_enabled)
         self.engine.processor.set_user_volume(1.0)
         self.all_devices = list_devices()
         self.devices = [dev for dev in self.all_devices if dev.hostapi == WASAPI_HOSTAPI]
@@ -2654,6 +2860,7 @@ class RendererWindow(QtWidgets.QWidget):
                 preset.surround_fill_enabled = False
                 preset.upmix_9_1_6_enabled = False
             preset.channel_sanity_enabled = False
+            preset.sound_enhancer_enabled = bool(getattr(preset, "sound_enhancer_enabled", False))
             preset.user_volume = 1.0
             preset.audio_stability = DEFAULT_STREAM_PROFILE
 
@@ -3067,7 +3274,8 @@ class RendererWindow(QtWidgets.QWidget):
 
     def _build_route_card(self) -> QtWidgets.QFrame:
         device_box_height = 44
-        sample_rate_box_width = 262
+        sample_rate_value_width = 100
+        sample_rate_segment_width = sample_rate_value_width + 118
         layout = QtWidgets.QHBoxLayout()
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
@@ -3086,7 +3294,7 @@ class RendererWindow(QtWidgets.QWidget):
             combo.setMinimumHeight(device_box_height)
             combo.setMaximumHeight(device_box_height)
             combo.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        self.sample_rate_combo.setMinimumWidth(sample_rate_box_width)
+        self.sample_rate_combo.setFixedWidth(sample_rate_value_width)
         self.sample_rate_combo.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
         for dev in renderer_input_devices(self.devices):
@@ -3111,11 +3319,8 @@ class RendererWindow(QtWidgets.QWidget):
         output_label.setObjectName("routeEyebrow")
         sample_rate_label = QtWidgets.QLabel("Sample rate")
         sample_rate_label.setObjectName("routeEyebrow")
-        self.refresh_devices_button = QtWidgets.QPushButton("Refresh Devices")
-        self.refresh_devices_button.setObjectName("routeRefresh")
-        self.refresh_devices_button.setToolTip("Re-enumerate WASAPI devices")
-        self.refresh_devices_button.setCursor(QtCore.Qt.PointingHandCursor)
-        self.refresh_devices_button.setFixedWidth(134)
+        self.refresh_devices_button = RouteRefreshButton()
+        self.refresh_devices_button.setFixedWidth(48)
         self.refresh_devices_button.setFixedHeight(device_box_height)
         self.refresh_devices_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
@@ -3153,17 +3358,17 @@ class RendererWindow(QtWidgets.QWidget):
 
         layout.addWidget(route_segment(input_label, self.input_fixed_label), 1)
         layout.addWidget(route_segment(output_label, self.output_combo), 1)
-        layout.addWidget(self.refresh_devices_button, 0)
         layout.addWidget(
             route_segment(
                 sample_rate_label,
                 self.sample_rate_combo,
-                sample_rate_box_width,
+                sample_rate_segment_width,
                 fixed_width=True,
                 label_width=88,
             ),
             0,
         )
+        layout.addWidget(self.refresh_devices_button, 0)
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("routeLane")
@@ -3214,7 +3419,11 @@ class RendererWindow(QtWidgets.QWidget):
         self.upmix916_checkbox = SwitchCheckBox("9.1.6 Upmix")
         self.upmix916_checkbox.setChecked(self.upmix_9_1_6_enabled)
 
-        for checkbox in (self.surround_fill_checkbox, self.upmix916_checkbox):
+        self.sound_enhancer_checkbox = SwitchCheckBox("Sound Enhancer")
+        self.sound_enhancer_checkbox.setChecked(self.sound_enhancer_enabled)
+        self.sound_enhancer_checkbox.setToolTip("Boost laptop-speaker loudness with protected limiting")
+
+        for checkbox in (self.surround_fill_checkbox, self.upmix916_checkbox, self.sound_enhancer_checkbox):
             checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
 
         toggle_grid = QtWidgets.QGridLayout()
@@ -3222,6 +3431,7 @@ class RendererWindow(QtWidgets.QWidget):
         toggle_grid.setVerticalSpacing(11)
         toggle_grid.addWidget(self.surround_fill_checkbox, 0, 0)
         toggle_grid.addWidget(self.upmix916_checkbox, 0, 1)
+        toggle_grid.addWidget(self.sound_enhancer_checkbox, 1, 0, 1, 2)
         layout.addLayout(toggle_grid)
         return card(layout)
 
@@ -3254,24 +3464,31 @@ class RendererWindow(QtWidgets.QWidget):
 
     def _build_keep_awake_card(self) -> QtWidgets.QFrame:
         layout = QtWidgets.QVBoxLayout()
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(14, 9, 14, 9)
+        layout.setSpacing(2)
 
         self.keep_awake_checkbox = SwitchCheckBox("Keep output awake")
         self.keep_awake_checkbox.setChecked(self.keep_output_awake_enabled)
-        self.keep_awake_checkbox.setMinimumHeight(30)
+        self.keep_awake_checkbox.setMinimumHeight(28)
         self.keep_awake_checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         layout.addWidget(self.keep_awake_checkbox)
 
         helper = QtWidgets.QLabel("Silent stream to selected output")
-        helper.setObjectName("subtitle")
+        helper.setObjectName("keepAwakeHelper")
         helper.setWordWrap(True)
         helper.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        layout.addWidget(helper)
+        helper_shell = QtWidgets.QWidget()
+        helper_shell.setObjectName("keepAwakeHelperShell")
+        helper_shell.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        helper_layout = QtWidgets.QVBoxLayout(helper_shell)
+        helper_layout.setContentsMargins(0, 0, 0, 0)
+        helper_layout.setSpacing(0)
+        helper_layout.addWidget(helper)
+        layout.addWidget(helper_shell)
         frame = card(layout)
         frame.setObjectName("keepAwakeCard")
-        frame.setMinimumHeight(86)
-        frame.setMaximumHeight(96)
+        frame.setMinimumHeight(76)
+        frame.setMaximumHeight(82)
         frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         return frame
 
@@ -3318,7 +3535,7 @@ class RendererWindow(QtWidgets.QWidget):
         layout.addWidget(section_label("Diagnostics"), 0, 0, 1, 2)
 
         self.diag_labels: dict[str, QtWidgets.QLabel] = {}
-        keys = ("Preset", "Route", "Channels", "Layout", "Stream", "Limiter", "Upmix", "Active", "Output")
+        keys = ("Preset", "Route", "Channels", "Layout", "Stream", "Limiter", "Enhancer", "Upmix", "Active", "Output")
         for row, key in enumerate(keys, start=1):
             name = QtWidgets.QLabel(key)
             name.setStyleSheet(f"color:{DIM}; background-color:#000000; padding:7px 0px;")
@@ -3354,6 +3571,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.refresh_devices_button.clicked.connect(self.refresh_devices)
         self.surround_fill_checkbox.toggled.connect(self.update_surround_fill)
         self.upmix916_checkbox.toggled.connect(self.update_upmix_9_1_6)
+        self.sound_enhancer_checkbox.toggled.connect(self.update_sound_enhancer)
         self.keep_awake_checkbox.toggled.connect(self.update_keep_output_awake)
         self.system_boot_checkbox.toggled.connect(self.set_system_boot_autostart)
         self.smart_switch_checkbox.toggled.connect(lambda checked: self._persist_state(was_running=self.engine.snapshot().running))
@@ -3646,6 +3864,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.preamp_slider.setValue(int(self.settings.get("preamp_db", DEFAULT_PREAMP_DB)))
         self.surround_fill_checkbox.setChecked(self._audio_recovery_bool("surround_fill_enabled", False))
         self.upmix916_checkbox.setChecked(self._audio_recovery_bool("upmix_9_1_6_enabled", False))
+        self.sound_enhancer_checkbox.setChecked(self._audio_recovery_bool("sound_enhancer_enabled", False))
         self.keep_awake_checkbox.setChecked(bool(self.settings.get("keep_output_awake", False)))
         self._set_sample_rate_selection(self.settings.get("sample_rate_mode", DEFAULT_SAMPLE_RATE_MODE))
         self.update_preamp(int(self.preamp_slider.value()))
@@ -3653,6 +3872,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.update_surround_fill(self.surround_fill_checkbox.isChecked())
         self.update_upmix_9_1_6(self.upmix916_checkbox.isChecked())
         self.update_channel_sanity(False)
+        self.update_sound_enhancer(self.sound_enhancer_checkbox.isChecked())
         self.audio_stability = DEFAULT_STREAM_PROFILE
         self._set_peq_controls_from_settings()
         self._apply_peq_routing_state(persist=False)
@@ -3676,12 +3896,14 @@ class RendererWindow(QtWidgets.QWidget):
         self.preamp_slider.setValue(int(preset.preamp_db))
         self.surround_fill_checkbox.setChecked(bool(preset.surround_fill_enabled))
         self.upmix916_checkbox.setChecked(bool(preset.upmix_9_1_6_enabled))
+        self.sound_enhancer_checkbox.setChecked(bool(preset.sound_enhancer_enabled))
         self._set_sample_rate_selection(preset.sample_rate_mode)
         self.update_preamp(int(self.preamp_slider.value()))
         self.engine.processor.set_user_volume(1.0)
         self.update_surround_fill(self.surround_fill_checkbox.isChecked())
         self.update_upmix_9_1_6(self.upmix916_checkbox.isChecked())
         self.update_channel_sanity(False)
+        self.update_sound_enhancer(self.sound_enhancer_checkbox.isChecked())
         self.audio_stability = DEFAULT_STREAM_PROFILE
         self.set_channel_config(preset.channel_config, persist=False)
         self._set_peq_controls_from_values(
@@ -3724,6 +3946,7 @@ class RendererWindow(QtWidgets.QWidget):
             surround_fill_enabled=self.surround_fill_checkbox.isChecked(),
             upmix_9_1_6_enabled=self.upmix916_checkbox.isChecked(),
             channel_sanity_enabled=False,
+            sound_enhancer_enabled=self.sound_enhancer_checkbox.isChecked(),
             audio_stability=DEFAULT_STREAM_PROFILE,
             sample_rate_mode=self._selected_sample_rate_mode(),
             **self._current_peq_fields(),
@@ -3752,6 +3975,7 @@ class RendererWindow(QtWidgets.QWidget):
             surround_fill_enabled=self.surround_fill_checkbox.isChecked(),
             upmix_9_1_6_enabled=self.upmix916_checkbox.isChecked(),
             channel_sanity_enabled=False,
+            sound_enhancer_enabled=self.sound_enhancer_checkbox.isChecked(),
             audio_stability=DEFAULT_STREAM_PROFILE,
             sample_rate_mode=self._selected_sample_rate_mode(),
             **self._current_peq_fields(),
@@ -3954,7 +4178,6 @@ class RendererWindow(QtWidgets.QWidget):
         widgets = [self.input_fixed_label, self.input_combo, self.output_combo]
         if hasattr(self, "sample_rate_combo"):
             widgets.append(self.sample_rate_combo)
-            self.sample_rate_combo.setMinimumWidth(112)
         if hasattr(self, "refresh_devices_button"):
             widgets.append(self.refresh_devices_button)
         for widget in widgets:
@@ -4165,6 +4388,12 @@ class RendererWindow(QtWidgets.QWidget):
         if not self._restoring:
             self._persist_state(was_running=self.engine.snapshot().running)
 
+    def update_sound_enhancer(self, enabled: bool) -> None:
+        self.sound_enhancer_enabled = bool(enabled)
+        self.engine.processor.set_sound_enhancer_enabled(self.sound_enhancer_enabled)
+        if not self._restoring:
+            self._persist_state(was_running=self.engine.snapshot().running)
+
     def update_keep_output_awake(self, enabled: bool) -> None:
         self.keep_output_awake_enabled = bool(enabled)
         self._sync_keep_output_awake()
@@ -4354,6 +4583,12 @@ class RendererWindow(QtWidgets.QWidget):
             stream_text = f"{stream_text} | {snapshot.callback_status_count}x {snapshot.callback_status}"
         self.diag_labels["Stream"].setText(stream_text)
         self.diag_labels["Limiter"].setText(f"{dsp.limiter_gain:.3f}" + (" clip" if dsp.clipping else ""))
+        enhancer_text = "off"
+        if dsp.sound_enhancer_enabled:
+            enhancer_text = f"{dsp.sound_enhancer_gain:.3f}x"
+            if dsp.sound_enhancer_gain < 1.0:
+                enhancer_text += " protected"
+        self.diag_labels["Enhancer"].setText(enhancer_text)
         fill_parts = []
         if dsp.surround_fill_enabled:
             fill_parts.append("7.1 upmix active" if dsp.surround_fill_active else "7.1 upmix armed")
@@ -4522,6 +4757,7 @@ class RendererWindow(QtWidgets.QWidget):
                 "surround_fill_enabled": bool(self.surround_fill_checkbox.isChecked()) if hasattr(self, "surround_fill_checkbox") else False,
                 "upmix_9_1_6_enabled": bool(self.upmix916_checkbox.isChecked()) if hasattr(self, "upmix916_checkbox") else False,
                 "channel_sanity_enabled": False,
+                "sound_enhancer_enabled": bool(self.sound_enhancer_checkbox.isChecked()) if hasattr(self, "sound_enhancer_checkbox") else False,
                 "audio_stability": DEFAULT_STREAM_PROFILE,
                 "sample_rate_mode": self._selected_sample_rate_mode(),
                 "keep_output_awake": bool(self.keep_awake_checkbox.isChecked()) if hasattr(self, "keep_awake_checkbox") else False,

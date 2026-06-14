@@ -93,6 +93,11 @@ constexpr std::array<std::array<double, 2>, kWindows71Channels> kWindows71Matrix
     {{0.0, 1.0}},
 }};
 
+constexpr double kSoundEnhancerMakeupGain = 2.371373705661655; // +7.5 dB
+constexpr double kSoundEnhancerCeiling = 0.8912509381337456; // -1.0 dBFS
+constexpr double kSoundEnhancerAttackAlpha = 0.85;
+constexpr double kSoundEnhancerReleaseAlpha = 0.08;
+
 struct NativeDspSnapshot {
     float channelLevels[kInputChannels];
     float channelRms[kInputChannels];
@@ -114,6 +119,8 @@ struct NativeDspSnapshot {
     int32_t upmix916Active;
     int32_t channelSanityEnabled;
     int32_t channelSanityActive;
+    int32_t soundEnhancerEnabled;
+    float soundEnhancerGain;
 };
 
 struct NativeEngineSnapshot {
@@ -492,6 +499,13 @@ public:
         snapshotChannelSanityEnabled_.store(enabled ? 1 : 0, std::memory_order_relaxed);
     }
 
+    void set_sound_enhancer_enabled(bool enabled) {
+        soundEnhancerEnabled_.store(enabled ? 1 : 0, std::memory_order_relaxed);
+        soundEnhancerSafetyGain_ = 1.0;
+        snapshotSoundEnhancerEnabled_.store(enabled ? 1 : 0, std::memory_order_relaxed);
+        snapshotSoundEnhancerGain_.store(1.0f, std::memory_order_relaxed);
+    }
+
     void set_monitor_layout(int32_t layout) {
         monitorLayout_.store(layout == static_cast<int32_t>(LayoutKind::Sharur916) ? layout : 0, std::memory_order_relaxed);
     }
@@ -540,7 +554,9 @@ public:
         hpX1_.fill(0.0);
         hpY1_.fill(0.0);
         lpY1_.fill(0.0);
+        soundEnhancerSafetyGain_ = 1.0;
         snapshotLimiterGain_.store(1.0f, std::memory_order_relaxed);
+        snapshotSoundEnhancerGain_.store(1.0f, std::memory_order_relaxed);
         snapshotClipping_.store(0, std::memory_order_relaxed);
         snapshotSurroundFillActive_.store(0, std::memory_order_relaxed);
         snapshotUpmix916Active_.store(0, std::memory_order_relaxed);
@@ -612,6 +628,7 @@ public:
         const double trimLeftGain = static_cast<double>(trimLeftGain_.load(std::memory_order_relaxed));
         const double trimRightGain = static_cast<double>(trimRightGain_.load(std::memory_order_relaxed));
         const bool masterMuted = masterMuted_.load(std::memory_order_relaxed) != 0;
+        const bool soundEnhancerEnabled = soundEnhancerEnabled_.load(std::memory_order_relaxed) != 0;
         const float preampDb = preampDb_.load(std::memory_order_relaxed);
         const float trimLeftDb = trimLeftDb_.load(std::memory_order_relaxed);
         const float trimRightDb = trimRightDb_.load(std::memory_order_relaxed);
@@ -654,10 +671,17 @@ public:
                 stereo_[stereoIndex + 1] *= trimRightGain;
             }
         }
+        bool soundEnhancerLimited = false;
+        double soundEnhancerGain = 1.0;
+        if (soundEnhancerEnabled) {
+            soundEnhancerGain = apply_sound_enhancer(frames, soundEnhancerLimited);
+        } else {
+            soundEnhancerSafetyGain_ = 1.0;
+        }
         peakBeforeLimiter = peak_stereo(frames);
 
         double targetGain = 1.0;
-        bool clipping = false;
+        bool clipping = soundEnhancerLimited;
         if (peakBeforeLimiter > 1.0) {
             targetGain = 1.0 / peakBeforeLimiter;
             clipping = true;
@@ -695,6 +719,8 @@ public:
             upmix916Active,
             channelSanityEnabled,
             channelSanityActive,
+            soundEnhancerEnabled,
+            static_cast<float>(soundEnhancerGain),
             clipping
         );
         return true;
@@ -723,6 +749,8 @@ public:
         out.upmix916Active = snapshotUpmix916Active_.load(std::memory_order_relaxed);
         out.channelSanityEnabled = snapshotChannelSanityEnabled_.load(std::memory_order_relaxed);
         out.channelSanityActive = snapshotChannelSanityActive_.load(std::memory_order_relaxed);
+        out.soundEnhancerEnabled = snapshotSoundEnhancerEnabled_.load(std::memory_order_relaxed);
+        out.soundEnhancerGain = snapshotSoundEnhancerGain_.load(std::memory_order_relaxed);
     }
 
 private:
@@ -784,6 +812,54 @@ private:
             peak = std::max(peak, std::abs(stereo_[stereoIndex + 1]));
         }
         return peak;
+    }
+
+    double apply_sound_enhancer(uint32_t frames, bool& limited) {
+        // Post-mix laptop-speaker loudness: fixed makeup gain, then a fast
+        // safety envelope at -1 dBFS before the final full-scale limiter.
+        // This deliberately leaves matrix, PEQ, trim, and routing math intact.
+        limited = false;
+        if (frames == 0) {
+            return 1.0;
+        }
+
+        const double peak = peak_stereo(frames);
+        double targetSafetyGain = 1.0;
+        if (peak > 1e-12) {
+            const double boostedPeak = peak * kSoundEnhancerMakeupGain;
+            if (boostedPeak > kSoundEnhancerCeiling) {
+                targetSafetyGain = kSoundEnhancerCeiling / boostedPeak;
+                limited = true;
+            }
+        }
+
+        const double alpha = targetSafetyGain < soundEnhancerSafetyGain_
+            ? kSoundEnhancerAttackAlpha
+            : kSoundEnhancerReleaseAlpha;
+        const double smoothedSafetyGain = ((1.0 - alpha) * soundEnhancerSafetyGain_) + (alpha * targetSafetyGain);
+        const double appliedSafetyGain = limited ? std::min(smoothedSafetyGain, targetSafetyGain) : smoothedSafetyGain;
+        soundEnhancerSafetyGain_ = smoothedSafetyGain;
+
+        double appliedGain = kSoundEnhancerMakeupGain * appliedSafetyGain;
+        for (uint32_t frame = 0; frame < frames; ++frame) {
+            const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
+            stereo_[stereoIndex] *= appliedGain;
+            stereo_[stereoIndex + 1] *= appliedGain;
+        }
+
+        const double postPeak = peak_stereo(frames);
+        if (postPeak > kSoundEnhancerCeiling) {
+            const double emergencyGain = kSoundEnhancerCeiling / postPeak;
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
+                stereo_[stereoIndex] *= emergencyGain;
+                stereo_[stereoIndex + 1] *= emergencyGain;
+            }
+            appliedGain *= emergencyGain;
+            limited = true;
+        }
+
+        return appliedGain;
     }
 
     void activate_pending_peq_config() {
@@ -1341,6 +1417,8 @@ private:
         snapshotSurroundFillEnabled_.store(surroundFillEnabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         snapshotUpmix916Enabled_.store(upmix916Enabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         snapshotChannelSanityEnabled_.store(channelSanityEnabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        snapshotSoundEnhancerEnabled_.store(soundEnhancerEnabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        snapshotSoundEnhancerGain_.store(1.0f, std::memory_order_relaxed);
     }
 
     void publish_zero_levels() {
@@ -1369,6 +1447,8 @@ private:
         bool upmix916Active,
         bool channelSanityEnabled,
         bool channelSanityActive,
+        bool soundEnhancerEnabled,
+        float soundEnhancerGain,
         bool clipping
     ) {
         for (int i = 0; i < kInputChannels; ++i) {
@@ -1393,6 +1473,8 @@ private:
         snapshotUpmix916Active_.store(upmix916Active ? 1 : 0, std::memory_order_relaxed);
         snapshotChannelSanityEnabled_.store(channelSanityEnabled ? 1 : 0, std::memory_order_relaxed);
         snapshotChannelSanityActive_.store(channelSanityActive ? 1 : 0, std::memory_order_relaxed);
+        snapshotSoundEnhancerEnabled_.store(soundEnhancerEnabled ? 1 : 0, std::memory_order_relaxed);
+        snapshotSoundEnhancerGain_.store(soundEnhancerGain, std::memory_order_relaxed);
     }
 
     int capacityFrames_ = 0;
@@ -1439,9 +1521,11 @@ private:
     std::atomic<int32_t> surroundFillEnabled_{0};
     std::atomic<int32_t> upmix916Enabled_{0};
     std::atomic<int32_t> channelSanityEnabled_{0};
+    std::atomic<int32_t> soundEnhancerEnabled_{0};
     std::atomic<int32_t> monitorLayout_{0};
     std::atomic<int32_t> inputLayout_{0};
     double limiterGain_ = 1.0;
+    double soundEnhancerSafetyGain_ = 1.0;
 
     std::array<std::atomic<float>, kInputChannels> snapshotLevels_{};
     std::array<std::atomic<float>, kInputChannels> snapshotRms_{};
@@ -1463,6 +1547,8 @@ private:
     std::atomic<int32_t> snapshotUpmix916Active_{0};
     std::atomic<int32_t> snapshotChannelSanityEnabled_{0};
     std::atomic<int32_t> snapshotChannelSanityActive_{0};
+    std::atomic<int32_t> snapshotSoundEnhancerEnabled_{0};
+    std::atomic<float> snapshotSoundEnhancerGain_{1.0f};
 };
 
 class NativeEngine {
@@ -1920,6 +2006,12 @@ __declspec(dllexport) void downmix_native_set_upmix_916_enabled(NativeEngine* en
 __declspec(dllexport) void downmix_native_set_channel_sanity_enabled(NativeEngine* engine, int32_t enabled) {
     if (engine != nullptr) {
         engine->dsp().set_channel_sanity_enabled(enabled != 0);
+    }
+}
+
+__declspec(dllexport) void downmix_native_set_sound_enhancer_enabled(NativeEngine* engine, int32_t enabled) {
+    if (engine != nullptr) {
+        engine->dsp().set_sound_enhancer_enabled(enabled != 0);
     }
 }
 

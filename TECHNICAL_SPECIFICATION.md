@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-14
 
-Production artifact: `Finalised version 3\Downmixrenderer.exe`
+Current local test artifact: `testing\Downmixrenderer.exe`
 
 Executable name: `Downmixrenderer.exe`
 
@@ -33,7 +33,7 @@ AudioEngine orchestration (`downmix_renderer.audio_engine`)
     |
     v
 DSP pipeline: input normalize -> optional channel repair/upmix -> LFE/dry alignment -> matrix
-    -> preamp -> PEQ/swap/correction -> trim -> limiter -> master volume -> stereo output
+    -> preamp -> PEQ/swap/correction -> trim -> optional Sound Enhancer -> limiter -> master volume -> stereo output
 ```
 
 ### 2.1 Design Approach
@@ -56,8 +56,9 @@ The packaged app loads `downmix_renderer\downmix_renderer_native.dll`, which wra
 - Plays two float32 channels at 48 kHz.
 - Uses a duplex WASAPI device.
 - Opens streams in WASAPI shared mode in the current C++ configuration.
-- Uses the `ultra` profile by default with a 128-frame block request.
-- Uses RAW fallback profile with a 256-frame block request if needed.
+- Uses the `ultra` profile by default with a 128-frame block request at 48 kHz.
+- Scales stream block requests at 96 kHz and 192 kHz to preserve the same approximate callback time budget as 48 kHz.
+- Uses RAW fallback profile with a 256-frame block request at 48 kHz if needed, also scaled by sample rate.
 - Exposes a C ABI consumed by Python through `ctypes`.
 
 The UI labels the stream as "Shared WASAPI" to match the native miniaudio configuration (`ma_share_mode_shared`) with pro-audio hints for the ultra profile.
@@ -131,7 +132,7 @@ Presets are user-created; the app starts with no built-in presets. Manual preset
 
 ### 3.4 Smart Output Switching
 
-Smart preset switching polls device state every 1.5 seconds. Every third poll may force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes `Refresh Devices`, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
+Smart preset switching polls device state every 1.5 seconds. Every third poll may force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes a refresh icon, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
 
 Preset matching score:
 
@@ -311,6 +312,11 @@ Speaker EQ / L-R correction
     |
     v
 Channel trim
+    |
+    v
+Optional Sound Enhancer:
+    - fixed post-mix makeup gain
+    - protected -1 dBFS ceiling
     |
     v
 Soft limiter
@@ -568,7 +574,31 @@ left *= trim_left_gain
 right *= trim_right_gain
 ```
 
-### 5.10 Limiter
+### 5.10 Sound Enhancer
+
+Sound Enhancer is an optional post-mix loudness stage intended for quiet laptop speakers. It runs after matrix, preamp, PEQ, L/R swap, speaker correction, and channel trim, and before the final limiter. It does not change routing, matrix coefficients, PEQ math, trim semantics, LFE timing, or channel mapping.
+
+The stage uses fixed makeup gain plus a protected ceiling:
+
+```text
+makeup_gain = 10^(7.5 / 20)
+ceiling = 10^(-1.0 / 20)
+boosted_peak = peak * makeup_gain
+```
+
+If `boosted_peak` exceeds the ceiling, a fast safety gain is applied before the final limiter:
+
+```text
+target_safety_gain = ceiling / boosted_peak
+alpha = 0.85 if target_safety_gain < previous_safety_gain else 0.08
+smoothed_safety_gain = (1 - alpha) * previous_safety_gain + alpha * target_safety_gain
+applied_safety_gain = min(smoothed_safety_gain, target_safety_gain)
+stereo *= makeup_gain * applied_safety_gain
+```
+
+If a block still exceeds the ceiling due to numerical edge cases, the block is scaled down immediately to the same ceiling. This is a safety guard, not a tone-shaping clipper.
+
+### 5.11 Limiter
 
 The limiter protects against output samples exceeding absolute amplitude `1.0`.
 
@@ -696,7 +726,7 @@ Native code dependencies:
 | `scripts/make_icon.py` | Build icon assets |
 | `tests/` | Unit tests for UI, DSP, native parity, PEQ, settings, presets, route probing, startup |
 | `assets/` | Production logo/icon assets used by UI and package |
-| `Finalised version 3/` | Current local production package folder, ignored by git |
+| `testing/` | Current local test package folder, ignored by git |
 
 ## 9. UI/UX Logic And Interaction Flow
 
@@ -704,13 +734,13 @@ Native code dependencies:
 
 The main tab is arranged into:
 
-- Route card: fixed `CABLE Input` presentation, output selector, Refresh Devices action, and sample-rate selector.
+- Route card: fixed `CABLE Input` presentation, output selector, compact sample-rate selector, and refresh icon action.
 - Transport card: render start/stop toggle and status.
 - Volume/preamp card: preamp control and display.
 - Keep-awake card: silent output stream option when renderer is stopped.
 - Channel card: live channel tiles and room visualizer.
 - Meter card: stereo sum meter.
-- Diagnostics card: route, stream, limiter, active channels, output/volume, upmix/PEQ summaries.
+- Diagnostics card: route, stream, limiter, Sound Enhancer, active channels, output/volume, upmix/PEQ summaries.
 
 The UI refresh timer runs every 40 ms. It polls engine snapshots, applies stream self-heal checks, updates meters, channel tiles, diagnostics, and render toggle state.
 
@@ -797,7 +827,7 @@ If an active preset route disappears:
 
 Device lists are refreshed while preserving current selections when possible.
 
-Manual `Refresh Devices` and periodic polling both preserve selected input/output identities when possible. If a running route changes materially, the renderer restarts on the refreshed route.
+Manual route refresh and periodic polling both preserve selected input/output identities when possible. If a running route changes materially, the renderer restarts on the refreshed route.
 
 ### 10.6 Volume Follower Fallback
 
@@ -823,7 +853,7 @@ Performance choices:
 
 - Native C++ backend is the production path.
 - Audio callback avoids Python execution in normal packaged operation.
-- Native WASAPI ULTRA mode uses a low-latency 128-frame period with three periods to reduce startup crackle/stutter under GPU/DWM scheduling pressure.
+- Native WASAPI ULTRA mode uses a low-latency 128-frame period at 48 kHz with three periods, then scales frame count at 96 kHz and 192 kHz so GPU/DWM scheduling pressure does not shrink the callback deadline below the 48 kHz time budget.
 - UI animation work is throttled while rendering where it does not alter the `Finalised version 3` backdrop behavior, and backdrop repaint regions skip hidden/covered pixels to reduce GPU/DWM contention without changing DSP math or stream routing.
 - DSP buffers are preallocated and resized outside steady-state operation.
 - Native configuration is shared through atomics and immutable PEQ config snapshots.
@@ -838,8 +868,8 @@ Profiles:
 
 | Profile | Block size | Latency request |
 | --- | ---: | --- |
-| `ultra` | 128 frames | `low` |
-| `raw` | 256 frames | `low` |
+| `ultra` | 128 frames at 48 kHz, 256 at 96 kHz, 512 at 192 kHz | `low` |
+| `raw` | 256 frames at 48 kHz, 512 at 96 kHz, 1024 at 192 kHz | `low` |
 
 Native backend clamps requested block size between 64 and 4096 frames and reserves enough DSP capacity for eight blocks.
 
@@ -893,10 +923,10 @@ The default PyInstaller output folder is:
 Finalised Version
 ```
 
-The current production build is generated with:
+The current local testing build is generated with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "Finalised version 3"
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "testing"
 ```
 
 The EXE name remains:
@@ -909,7 +939,7 @@ Downmixrenderer.exe
 
 Recommended validation pass:
 
-1. Launch `Finalised version 3\Downmixrenderer.exe`.
+1. Launch `testing\Downmixrenderer.exe`.
 2. Confirm the app opens without framework/runtime errors.
 3. Confirm the route bar shows `CABLE Input` for the VB-CABLE capture endpoint.
 4. Confirm output selector shows available WASAPI stereo outputs.
@@ -924,7 +954,7 @@ Recommended validation pass:
 13. Apply channel trim values inside `-24..0 dB` and confirm they persist.
 14. Create, update, select, and delete a preset.
 15. Confirm smart switching selects matching presets when Windows default output changes.
-16. Press Refresh Devices after connecting or waking an output device and confirm the current selection is preserved when possible.
+16. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
 17. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled.
 18. Open Raw Monitor, minimize the main window, and confirm Raw Monitor remains visible.
 19. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
@@ -965,8 +995,8 @@ The application is considered production-ready when:
 
 - Unit tests pass.
 - Native DLL builds successfully.
-- PyInstaller creates `Finalised version 3\Downmixrenderer.exe` for this release.
-- The EXE launches and stays running.
+- PyInstaller creates `testing\Downmixrenderer.exe` for this release.
+- The EXE launches and stays running from `testing\Downmixrenderer.exe`.
 - The UI restores settings without crashing.
 - Audio stream starts on a valid 16-channel WASAPI input and stereo WASAPI output.
 - DSP snapshot values update under signal.

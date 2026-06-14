@@ -47,6 +47,7 @@ class Preset:
     surround_fill_enabled: bool = False
     upmix_9_1_6_enabled: bool = False
     channel_sanity_enabled: bool = False
+    sound_enhancer_enabled: bool = False
     audio_stability: str = DEFAULT_AUDIO_STABILITY
     sample_rate_mode: str = DEFAULT_SAMPLE_RATE_MODE
     output_keywords: list[str] = field(default_factory=list)
@@ -72,6 +73,7 @@ class Preset:
             surround_fill_enabled=bool(data.get("surround_fill_enabled", False)),
             upmix_9_1_6_enabled=bool(data.get("upmix_9_1_6_enabled", False)),
             channel_sanity_enabled=bool(data.get("channel_sanity_enabled", False)),
+            sound_enhancer_enabled=bool(data.get("sound_enhancer_enabled", False)),
             audio_stability=_normalize_audio_stability(str(data.get("audio_stability") or DEFAULT_AUDIO_STABILITY)),
             sample_rate_mode=normalize_sample_rate_mode(data.get("sample_rate_mode", DEFAULT_SAMPLE_RATE_MODE)),
             output_keywords=[str(item).lower() for item in data.get("output_keywords", [])],
@@ -97,6 +99,7 @@ class Preset:
             "surround_fill_enabled": self.surround_fill_enabled,
             "upmix_9_1_6_enabled": self.upmix_9_1_6_enabled,
             "channel_sanity_enabled": self.channel_sanity_enabled,
+            "sound_enhancer_enabled": self.sound_enhancer_enabled,
             "audio_stability": self.audio_stability,
             "sample_rate_mode": normalize_sample_rate_mode(self.sample_rate_mode),
             "output_keywords": self.output_keywords,
@@ -130,6 +133,7 @@ def preset_from_current(
     surround_fill_enabled: bool = False,
     upmix_9_1_6_enabled: bool = False,
     channel_sanity_enabled: bool = False,
+    sound_enhancer_enabled: bool = False,
     audio_stability: str = DEFAULT_AUDIO_STABILITY,
     sample_rate_mode: str = DEFAULT_SAMPLE_RATE_MODE,
     lr_swap_enabled: bool = False,
@@ -151,6 +155,7 @@ def preset_from_current(
         surround_fill_enabled=surround_fill_enabled,
         upmix_9_1_6_enabled=upmix_9_1_6_enabled,
         channel_sanity_enabled=channel_sanity_enabled,
+        sound_enhancer_enabled=sound_enhancer_enabled,
         audio_stability=_normalize_audio_stability(audio_stability),
         sample_rate_mode=normalize_sample_rate_mode(sample_rate_mode),
         output_keywords=_keywords_for(output_device),
@@ -174,6 +179,7 @@ def update_preset_from_current(
     surround_fill_enabled: bool = False,
     upmix_9_1_6_enabled: bool = False,
     channel_sanity_enabled: bool = False,
+    sound_enhancer_enabled: bool = False,
     audio_stability: str = DEFAULT_AUDIO_STABILITY,
     sample_rate_mode: str = DEFAULT_SAMPLE_RATE_MODE,
     lr_swap_enabled: bool = False,
@@ -192,6 +198,7 @@ def update_preset_from_current(
     preset.surround_fill_enabled = surround_fill_enabled
     preset.upmix_9_1_6_enabled = upmix_9_1_6_enabled
     preset.channel_sanity_enabled = channel_sanity_enabled
+    preset.sound_enhancer_enabled = sound_enhancer_enabled
     preset.audio_stability = _normalize_audio_stability(audio_stability)
     preset.sample_rate_mode = normalize_sample_rate_mode(sample_rate_mode)
     preset.output_keywords = _keywords_for(output_device)

@@ -43,6 +43,8 @@ class _NativeDspSnapshot(ctypes.Structure):
         ("upmix_9_1_6_active", ctypes.c_int32),
         ("channel_sanity_enabled", ctypes.c_int32),
         ("channel_sanity_active", ctypes.c_int32),
+        ("sound_enhancer_enabled", ctypes.c_int32),
+        ("sound_enhancer_gain", ctypes.c_float),
     ]
 
 
@@ -273,6 +275,11 @@ class NativeAudioBackend:
     def set_channel_sanity_enabled(self, enabled: bool) -> None:
         self._dll.downmix_native_set_channel_sanity_enabled(self._handle, int(bool(enabled)))
 
+    def set_sound_enhancer_enabled(self, enabled: bool) -> None:
+        if not getattr(self, "_has_sound_enhancer", False):
+            return
+        self._dll.downmix_native_set_sound_enhancer_enabled(self._handle, int(bool(enabled)))
+
     def set_monitor_layout(self, layout_id: str) -> None:
         value = 1 if layout_id == "sharur_9_1_6" else 0
         self._dll.downmix_native_set_monitor_layout(self._handle, value)
@@ -364,6 +371,11 @@ class NativeAudioBackend:
         self._dll.downmix_native_set_surround_fill_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int32]
         self._dll.downmix_native_set_upmix_916_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int32]
         self._dll.downmix_native_set_channel_sanity_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+        try:
+            self._dll.downmix_native_set_sound_enhancer_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+            self._has_sound_enhancer = True
+        except AttributeError:
+            self._has_sound_enhancer = False
         self._dll.downmix_native_set_monitor_layout.argtypes = [ctypes.c_void_p, ctypes.c_int32]
         self._dll.downmix_native_set_input_layout.argtypes = [ctypes.c_void_p, ctypes.c_int32]
         self._dll.downmix_native_reset_runtime_state.argtypes = [ctypes.c_void_p]
@@ -429,6 +441,9 @@ class NativeDownmixProcessor:
 
     def set_channel_sanity_enabled(self, enabled: bool) -> None:
         self._backend.set_channel_sanity_enabled(enabled)
+
+    def set_sound_enhancer_enabled(self, enabled: bool) -> None:
+        self._backend.set_sound_enhancer_enabled(enabled)
 
     def set_monitor_layout(self, layout_id: str) -> None:
         self._backend.set_monitor_layout(layout_id)
@@ -516,4 +531,6 @@ def _dsp_snapshot(raw: _NativeDspSnapshot) -> DspSnapshot:
         upmix_9_1_6_active=bool(raw.upmix_9_1_6_active),
         channel_sanity_enabled=bool(raw.channel_sanity_enabled),
         channel_sanity_active=bool(raw.channel_sanity_active),
+        sound_enhancer_enabled=bool(raw.sound_enhancer_enabled),
+        sound_enhancer_gain=float(raw.sound_enhancer_gain),
     )

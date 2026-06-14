@@ -574,6 +574,61 @@ class DspTests(unittest.TestCase):
         self.assertLessEqual(float(np.max(np.abs(out))), 1.0 + 1e-6)
         self.assertTrue(processor.snapshot().clipping)
 
+    def test_sound_enhancer_lifts_quiet_material_without_clipping(self) -> None:
+        dry = DownmixProcessor(preamp_db=0)
+        enhanced = DownmixProcessor(preamp_db=0)
+        enhanced.set_sound_enhancer_enabled(True)
+
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 0] = (0.055 * np.sin(phase)).astype(np.float32)
+        data[:, 1] = (0.055 * np.sin(phase + 0.4)).astype(np.float32)
+
+        dry_out = dry.process(data)
+        enhanced_out = enhanced.process(data)
+        dry_rms = float(np.sqrt(np.mean(np.square(dry_out))))
+        enhanced_rms = float(np.sqrt(np.mean(np.square(enhanced_out))))
+        snapshot = enhanced.snapshot()
+
+        self.assertTrue(snapshot.sound_enhancer_enabled)
+        self.assertGreater(enhanced_rms, dry_rms * 1.9)
+        self.assertLessEqual(float(np.max(np.abs(enhanced_out))), 0.8914 + 1e-6)
+        self.assertFalse(snapshot.clipping)
+        self.assertTrue(np.all(np.isfinite(enhanced_out)))
+
+    def test_sound_enhancer_safely_limits_hot_material(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_sound_enhancer_enabled(True)
+        data = np.ones((DRY_DELAY_SAMPLES + 64, MAX_INPUT_CHANNELS), dtype=np.float32) * 0.9
+
+        out = processor.process(data)
+        snapshot = processor.snapshot()
+
+        self.assertLessEqual(float(np.max(np.abs(out))), 0.8914 + 1e-6)
+        self.assertTrue(snapshot.sound_enhancer_enabled)
+        self.assertLess(snapshot.sound_enhancer_gain, 1.0)
+        self.assertTrue(snapshot.clipping)
+
+    def test_sound_enhancer_can_be_disabled_without_changing_baseline_output(self) -> None:
+        baseline = DownmixProcessor(preamp_db=0)
+        processor = DownmixProcessor(preamp_db=0)
+        data = np.zeros((DRY_DELAY_SAMPLES + 64, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 0] = 0.12
+        data[:, 1] = -0.11
+
+        baseline.process(data)
+        processor.set_sound_enhancer_enabled(True)
+        processor.process(data)
+        processor.set_sound_enhancer_enabled(False)
+        enhanced_then_disabled = processor.process(data)
+        baseline_out = baseline.process(data)
+
+        np.testing.assert_allclose(enhanced_then_disabled, baseline_out, rtol=0, atol=1e-7)
+        snapshot = processor.snapshot()
+        self.assertFalse(snapshot.sound_enhancer_enabled)
+        self.assertAlmostEqual(snapshot.sound_enhancer_gain, 1.0, places=7)
+
     def test_non_finite_input_is_silently_sanitized(self) -> None:
         processor = DownmixProcessor(preamp_db=0)
         data = np.zeros((DRY_DELAY_SAMPLES + 16, MAX_INPUT_CHANNELS), dtype=np.float32)

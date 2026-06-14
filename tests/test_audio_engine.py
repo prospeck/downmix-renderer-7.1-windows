@@ -12,9 +12,10 @@ from downmix_renderer.audio_engine import (
     _normalize_stream_profile,
     _profile_start_candidates,
     _resolve_sample_rate,
+    _scaled_stream_block_size,
     _stream_settings,
 )
-from downmix_renderer.constants import BLOCK_SIZE, MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMPLE_RATE
+from downmix_renderer.constants import MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMPLE_RATE
 from downmix_renderer.devices import AudioDevice
 from downmix_renderer.native_audio import NativeBackendUnavailable
 
@@ -50,9 +51,6 @@ class AudioEngineSettingsTests(unittest.TestCase):
                 return None
 
             def stop(self) -> None:
-                return None
-
-            def close(self) -> None:
                 return None
 
             def close(self) -> None:
@@ -102,6 +100,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
             engine.close()
 
         self.assertEqual(opened[0]["samplerate"], 192000)
+        self.assertEqual(opened[0]["blocksize"], 1024)
         self.assertEqual(snapshot.sample_rate, 192000)
         self.assertEqual(snapshot.sample_rate_mode, "192000")
 
@@ -120,6 +119,13 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertEqual(_stream_settings("low_latency"), (LOW_LATENCY_BLOCK_SIZE, "low"))
         self.assertEqual(_stream_settings("raw"), (LOW_LATENCY_BLOCK_SIZE, "low"))
         self.assertEqual(_stream_settings("ultra"), (ULTRA_BLOCK_SIZE, "low"))
+
+    def test_stream_block_size_scales_with_sample_rate_to_preserve_time_budget(self) -> None:
+        self.assertEqual(_scaled_stream_block_size(ULTRA_BLOCK_SIZE, 48000), 128)
+        self.assertEqual(_scaled_stream_block_size(ULTRA_BLOCK_SIZE, 96000), 256)
+        self.assertEqual(_scaled_stream_block_size(ULTRA_BLOCK_SIZE, 192000), 512)
+        self.assertEqual(_stream_settings("ultra", 192000), (512, "low"))
+        self.assertEqual(_stream_settings("raw", 192000), (1024, "low"))
 
     def test_old_profile_names_are_migrated_to_safe_modes(self) -> None:
         self.assertEqual(_normalize_stream_profile("legacy_low"), "raw")
@@ -235,7 +241,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertIs(calls[0][0], input_device)
         self.assertIs(calls[0][1], output_device)
         self.assertEqual(calls[0][2], "ultra")
-        self.assertEqual(calls[0][3], ULTRA_BLOCK_SIZE)
+        self.assertEqual(calls[0][3], 512)
         self.assertEqual(calls[0][4], 192000)
 
     def test_missing_native_backend_falls_back_to_python_processor(self) -> None:

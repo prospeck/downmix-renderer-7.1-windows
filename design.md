@@ -18,7 +18,7 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 ## Layout Rules
 
 - The first screen is the actual renderer, not a landing page.
-- The route lane owns routing actions: fixed `CABLE Input`, output device, sample rate, and `Refresh Devices`.
+- The route lane owns routing actions: fixed `CABLE Input`, output device, compact sample rate, and a refresh icon.
 - Keep output/session controls close to renderer state, not hidden in debug tooling.
 - Main renderer columns remain stable at launch size and high DPI; fixed-format controls use explicit heights and minimum widths to avoid layout jumps.
 - The Presets tab keeps profile management and PEQ/correction controls together because those values are saved as one profile surface.
@@ -34,9 +34,10 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 
 ## Component Rules
 
-- Primary commands use clear text: `Render`, `Refresh Devices`, `Raw Monitor`, `New`, `Update`, `Delete`.
+- Primary commands use clear text: `Render`, `Raw Monitor`, `New`, `Update`, `Delete`; route refresh uses an icon-only button with a tooltip.
 - Icon-only controls are reserved for compact header actions such as renderer details and GitHub.
 - Toggles are used for binary audio/session options.
+- `Sound Enhancer` is a Gain / Monitor toggle because it is optional post-mix loudness processing, not a route or diagnostic action.
 - Numeric audio values use sliders or constrained line edits with clamping.
 - Route combo popups use the themed route view and show enough items to avoid cramped scroll affordances.
 - The header status says `Shared WASAPI | Ready` or `Shared WASAPI | ULTRA Mode` because the production backend uses WASAPI shared mode.
@@ -51,11 +52,12 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 ## Audio-Safety Constraints
 
 - Do not change matrix coefficients, LFE delay behavior, limiter behavior, PEQ math, channel trim semantics, or native/Python DSP parity unless fixing a verified audio bug.
+- Loudness enhancement must stay optional, post-mix, bounded by safety limiting, and mirrored between Python and native DSP.
 - UI polish must not add dependencies or move work onto the audio callback path.
 - Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows.
 
 ## Documentation And Testing Expectations
 
-- Docs must describe the current local production artifact path: `Finalised version 3\Downmixrenderer.exe`.
+- Docs must describe the current local testing artifact path: `testing\Downmixrenderer.exe`.
 - Tests should cover UI construction, layout regressions, Raw Monitor independence, route refresh behavior, startup shortcut validation, DSP invariants, PEQ parsing, settings safety, and native/Python parity where the DLL is available.
 - Any future behavior change should start with a regression test that fails for the old behavior and passes for the new behavior.
