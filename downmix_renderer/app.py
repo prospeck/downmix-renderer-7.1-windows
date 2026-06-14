@@ -94,6 +94,7 @@ QWidget#mainPage,
 QWidget#presetsPage,
 QWidget#presetsBody,
 QWidget#presetListContainer,
+QWidget#profileActions,
 QWidget#rendererLeftColumn,
 QWidget#rendererCenterColumn,
 QWidget#rendererRightColumn,
@@ -232,6 +233,11 @@ QFrame#routeSegment:hover {{
 QFrame#card[presetSurface="true"] {{
     background-color: rgba(5, 5, 5, 210);
     border-color: rgba(255, 255, 255, 30);
+}}
+QFrame#profileManagerCard {{
+    background-color: rgba(5, 5, 5, 216);
+    border: 1px solid #222222;
+    border-radius: 8px;
 }}
 QFrame#card:hover,
 QFrame#keepAwakeCard:hover {{
@@ -447,6 +453,9 @@ QPushButton:pressed {{
 QPushButton#preset {{
     color: {MID};
     text-align: left;
+    min-height: 32px;
+    max-height: 34px;
+    padding: 0px 10px;
 }}
 QPushButton#preset:hover {{
     color: {TEXT};
@@ -465,6 +474,23 @@ QPushButton#ghost:hover {{
     color: {TEXT};
     border-color: #777777;
     background-color: #070707;
+}}
+QPushButton#profileAction {{
+    color: {TEXT};
+    background-color: #050505;
+    border: 1px solid #2a2a2a;
+    border-radius: 7px;
+    min-height: 32px;
+    padding: 5px 12px;
+    font-weight: 650;
+}}
+QPushButton#profileAction:hover {{
+    border-color: #777777;
+    background-color: #090909;
+}}
+QPushButton#profileAction:pressed {{
+    border-color: #eeeeee;
+    background-color: #0d0d0d;
 }}
 QPushButton#rawMonitor {{
     color: {TEXT};
@@ -2984,70 +3010,13 @@ class RendererWindow(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 4, 6)
         layout.setSpacing(8)
 
-        library = QtWidgets.QVBoxLayout()
-        library.setContentsMargins(12, 10, 12, 10)
-        library.setSpacing(8)
-        library.addWidget(section_label("Saved Profiles"))
-
-        preset_scroller = QtWidgets.QScrollArea()
-        preset_scroller.setWidgetResizable(True)
-        preset_scroller.setFrameShape(QtWidgets.QFrame.NoFrame)
-        preset_scroller.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        preset_scroller.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        preset_scroller.viewport().setObjectName("transparentViewport")
-        preset_scroller.viewport().setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        preset_scroller.setMinimumHeight(92)
-        preset_scroller.setMaximumHeight(124)
-        preset_scroller.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-
-        preset_container = QtWidgets.QWidget()
-        preset_container.setObjectName("presetListContainer")
-        self.preset_buttons_layout = QtWidgets.QVBoxLayout(preset_container)
-        self.preset_buttons_layout.setContentsMargins(0, 0, 4, 0)
-        self.preset_buttons_layout.setSpacing(7)
-        preset_scroller.setWidget(preset_container)
-        library.addWidget(preset_scroller, 1)
-
-        controls = QtWidgets.QVBoxLayout()
-        controls.setContentsMargins(12, 10, 12, 10)
-        controls.setSpacing(8)
-        controls.addWidget(section_label("Profile Control"))
-        self.preset_name_edit = QtWidgets.QLineEdit()
-        self.preset_name_edit.setPlaceholderText("Profile name")
-        controls.addWidget(self.preset_name_edit)
-
-        actions = QtWidgets.QHBoxLayout()
-        actions.setSpacing(8)
-        self.new_preset_button = QtWidgets.QPushButton("New")
-        self.save_preset_button = QtWidgets.QPushButton("Update")
-        self.delete_preset_button = QtWidgets.QPushButton("Delete")
-        for button in (self.new_preset_button, self.save_preset_button, self.delete_preset_button):
-            button.setObjectName("ghost")
-            button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        actions.addWidget(self.new_preset_button)
-        actions.addWidget(self.save_preset_button)
-        actions.addWidget(self.delete_preset_button)
-        controls.addLayout(actions)
-
-        controls_card = card(controls, preset_surface=True)
-        controls_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-
-        right = QtWidgets.QVBoxLayout()
-        right.setSpacing(8)
-        right.addWidget(controls_card, 0, QtCore.Qt.AlignTop)
-
-        library_card = card(library, preset_surface=True)
-        library_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        profile_manager = self._build_profile_manager_card()
+        profile_manager.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         peq_card = self._build_peq_routing_card()
         self.peq_routing_card = peq_card
         peq_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        top = QtWidgets.QHBoxLayout()
-        top.setSpacing(10)
-        top.addWidget(library_card, 3, QtCore.Qt.AlignTop)
-        top.addLayout(right, 2)
-        top.setAlignment(QtCore.Qt.AlignTop)
         layout.setAlignment(QtCore.Qt.AlignTop)
-        layout.addLayout(top)
+        layout.addWidget(profile_manager)
         layout.addSpacing(2)
         layout.addWidget(peq_card, 1)
 
@@ -3055,6 +3024,73 @@ class RendererWindow(QtWidgets.QWidget):
         root.addWidget(scroll, 1)
         self._rebuild_preset_buttons()
         return tab
+
+    def _build_profile_manager_card(self) -> QtWidgets.QFrame:
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+
+        profile_column = QtWidgets.QVBoxLayout()
+        profile_column.setSpacing(7)
+        profile_column.addWidget(section_label("Saved Profiles"))
+
+        preset_scroller = QtWidgets.QScrollArea()
+        preset_scroller.setObjectName("profileListScroll")
+        preset_scroller.setWidgetResizable(True)
+        preset_scroller.setFrameShape(QtWidgets.QFrame.NoFrame)
+        preset_scroller.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        preset_scroller.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        preset_scroller.viewport().setObjectName("transparentViewport")
+        preset_scroller.viewport().setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        preset_scroller.setMinimumHeight(78)
+        preset_scroller.setMaximumHeight(86)
+        preset_scroller.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        preset_container = QtWidgets.QWidget()
+        preset_container.setObjectName("presetListContainer")
+        self.preset_grid_columns = 3
+        self.preset_buttons_layout = QtWidgets.QGridLayout(preset_container)
+        self.preset_buttons_layout.setContentsMargins(0, 0, 4, 0)
+        self.preset_buttons_layout.setHorizontalSpacing(7)
+        self.preset_buttons_layout.setVerticalSpacing(7)
+        preset_scroller.setWidget(preset_container)
+        profile_column.addWidget(preset_scroller)
+        layout.addLayout(profile_column, 5)
+
+        control_column = QtWidgets.QVBoxLayout()
+        control_column.setSpacing(7)
+        control_column.addWidget(section_label("Profile Control"))
+
+        self.preset_name_edit = QtWidgets.QLineEdit()
+        self.preset_name_edit.setObjectName("profileNameInput")
+        self.preset_name_edit.setPlaceholderText("Profile name")
+        self.preset_name_edit.setMinimumHeight(36)
+        control_column.addWidget(self.preset_name_edit)
+
+        actions_widget = QtWidgets.QWidget()
+        actions_widget.setObjectName("profileActions")
+        actions = QtWidgets.QHBoxLayout(actions_widget)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(7)
+        self.new_preset_button = QtWidgets.QPushButton("New")
+        self.save_preset_button = QtWidgets.QPushButton("Update")
+        self.delete_preset_button = QtWidgets.QPushButton("Delete")
+        for button in (self.new_preset_button, self.save_preset_button, self.delete_preset_button):
+            button.setObjectName("profileAction")
+            button.setMinimumHeight(34)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            actions.addWidget(button)
+        control_column.addWidget(actions_widget)
+        control_column.addStretch(1)
+        layout.addLayout(control_column, 3)
+
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("profileManagerCard")
+        frame.setProperty("presetSurface", True)
+        frame.setLayout(layout)
+        frame.setMinimumHeight(126)
+        frame.setMaximumHeight(146)
+        return frame
 
     def _build_peq_routing_card(self) -> QtWidgets.QFrame:
         layout = QtWidgets.QVBoxLayout()
@@ -3105,9 +3141,8 @@ class RendererWindow(QtWidgets.QWidget):
         layout.addLayout(eq_row)
 
         footer = QtWidgets.QLabel(
-            "DSP order: matrix/downmix -> master preamp -> User/global PEQ -> L/R swap -> "
-            "Speaker EQ/L-R correction -> channel trim -> existing limiter/output. Unsupported lines are ignored safely; "
-            "valid filters remain active."
+            "DSP Order: Matrix/Downmix -> Master Preamp -> User/Global PEQ -> L/R Swap -> "
+            "Speaker EQ/L-R Correction -> Channel Trim -> Sound Enhancer -> Limiter/Output."
         )
         footer.setObjectName("peqHelper")
         footer.setWordWrap(True)
@@ -3179,7 +3214,17 @@ class RendererWindow(QtWidgets.QWidget):
         enabled = SwitchCheckBox("Enable")
         enabled.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         header.addWidget(enabled, 0)
+        visibility_button = QtWidgets.QPushButton("Hide")
+        visibility_button.setObjectName("peqAction")
+        visibility_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        header.addWidget(visibility_button, 0)
         panel_layout.addLayout(header)
+
+        body = QtWidgets.QWidget()
+        body.setObjectName("globalPeqBody" if kind == "global" else "speakerPeqBody")
+        body_layout = QtWidgets.QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
 
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(8)
@@ -3191,7 +3236,7 @@ class RendererWindow(QtWidgets.QWidget):
         actions.addWidget(load_button)
         actions.addWidget(clear_button)
         actions.addStretch(1)
-        panel_layout.addLayout(actions)
+        body_layout.addLayout(actions)
 
         editor = QtWidgets.QPlainTextEdit()
         editor.setObjectName("peqText")
@@ -3202,7 +3247,8 @@ class RendererWindow(QtWidgets.QWidget):
             if kind == "global"
             else "Paste stereo correction text here. CH:0 and CH:1 are mapped per swap state."
         )
-        panel_layout.addWidget(editor, 1)
+        body_layout.addWidget(editor, 1)
+        panel_layout.addWidget(body, 1)
 
         status = QtWidgets.QLabel("Bypassed")
         status.setObjectName("peqStatus")
@@ -3215,12 +3261,16 @@ class RendererWindow(QtWidgets.QWidget):
             self.global_peq_clear_button = clear_button
             self.global_peq_text = editor
             self.global_peq_status_label = status
+            self.global_peq_visibility_button = visibility_button
+            self.global_peq_body = body
         else:
             self.speaker_eq_checkbox = enabled
             self.speaker_eq_load_button = load_button
             self.speaker_eq_clear_button = clear_button
             self.speaker_eq_text = editor
             self.speaker_eq_status_label = status
+            self.speaker_eq_visibility_button = visibility_button
+            self.speaker_peq_body = body
         return self._peq_panel(panel_layout)
 
     @staticmethod
@@ -3589,6 +3639,8 @@ class RendererWindow(QtWidgets.QWidget):
         self.speaker_eq_load_button.clicked.connect(lambda: self._load_peq_text(self.speaker_eq_text))
         self.global_peq_clear_button.clicked.connect(self.global_peq_text.clear)
         self.speaker_eq_clear_button.clicked.connect(self.speaker_eq_text.clear)
+        self.global_peq_visibility_button.clicked.connect(lambda: self._toggle_peq_editor_visibility("global"))
+        self.speaker_eq_visibility_button.clicked.connect(lambda: self._toggle_peq_editor_visibility("speaker"))
 
     def show_feature_help(self) -> None:
         dialog = DotBackdropDialog(self)
@@ -3656,18 +3708,28 @@ class RendererWindow(QtWidgets.QWidget):
             item = self.preset_buttons_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.setParent(None)
                 widget.deleteLater()
 
-        for preset in self.presets:
+        columns = max(1, int(getattr(self, "preset_grid_columns", 1)))
+        for index, preset in enumerate(self.presets):
             button = QtWidgets.QPushButton(preset.name)
             button.setObjectName("preset")
             button.setProperty("active", preset.id == self.active_preset_id)
+            button.setFixedHeight(34)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, pid=preset.id: self.apply_preset(pid, start_after=True, manual=True))
-            self.preset_buttons_layout.addWidget(button)
+            if isinstance(self.preset_buttons_layout, QtWidgets.QGridLayout):
+                self.preset_buttons_layout.addWidget(button, index // columns, index % columns)
+            else:
+                self.preset_buttons_layout.addWidget(button)
         if not self.presets:
             empty = QtWidgets.QLabel("No presets saved")
             empty.setStyleSheet(f"color:{DIM}; padding: 6px 2px;")
-            self.preset_buttons_layout.addWidget(empty)
+            if isinstance(self.preset_buttons_layout, QtWidgets.QGridLayout):
+                self.preset_buttons_layout.addWidget(empty, 0, 0, 1, columns)
+            else:
+                self.preset_buttons_layout.addWidget(empty)
 
     def _current_peq_fields(self) -> dict[str, object]:
         return {
@@ -3837,6 +3899,19 @@ class RendererWindow(QtWidgets.QWidget):
         except Exception as exc:
             detail = last_error or exc
             self._set_status(f"PEQ load failed: {detail}", "error")
+
+    def _toggle_peq_editor_visibility(self, kind: str) -> None:
+        if kind == "global":
+            body = getattr(self, "global_peq_body", None)
+            button = getattr(self, "global_peq_visibility_button", None)
+        else:
+            body = getattr(self, "speaker_peq_body", None)
+            button = getattr(self, "speaker_eq_visibility_button", None)
+        if body is None or button is None:
+            return
+        next_visible = not body.isVisible()
+        body.setVisible(next_visible)
+        button.setText("Hide" if next_visible else "Show")
 
     def _apply_launch_preset(self) -> None:
         active = self._preset_by_id(self.active_preset_id)

@@ -852,6 +852,82 @@ class AppUiTests(unittest.TestCase):
         presets_body = window.findChild(QtWidgets.QWidget, "presetsBody")
         self.assertLessEqual(presets_body.height() - window.peq_routing_card.geometry().bottom(), 8)
 
+    def test_presets_page_uses_compact_profile_manager_grid(self) -> None:
+        first = preset_from_current("Qudelix Wired", fake_input(), fake_usb_output(), -6, 1.0, "windows_7_1")
+        second = preset_from_current("Speakers", fake_input(), fake_output(), -8, 1.0, "windows_7_1")
+        window = self.make_window(
+            {
+                "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                "preset_schema_version": 3,
+                "active_preset_id": second.id,
+                "presets": [first.to_dict(), second.to_dict()],
+            },
+            devices=[fake_input(), fake_output(), fake_usb_output()],
+        )
+        self.addCleanup(self.app.processEvents)
+        self.addCleanup(window.hide)
+        window.resize(window.minimumSize())
+        window.show()
+        window.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        manager = window.findChild(QtWidgets.QFrame, "profileManagerCard")
+        profile_scroll = window.findChild(QtWidgets.QScrollArea, "profileListScroll")
+        actions = window.findChild(QtWidgets.QWidget, "profileActions")
+        buttons = window.findChildren(QtWidgets.QPushButton, "preset")
+
+        self.assertIsNotNone(manager)
+        self.assertIsNotNone(profile_scroll)
+        self.assertIsNotNone(actions)
+        self.assertGreaterEqual(getattr(window, "preset_grid_columns", 0), 2)
+        self.assertEqual(profile_scroll.verticalScrollBar().maximum(), 0)
+        self.assertLessEqual(manager.maximumHeight(), 156)
+        self.assertGreater(window.preset_name_edit.width(), window.new_preset_button.width())
+        self.assertEqual([button.minimumHeight() for button in buttons], [34, 34])
+        self.assertTrue(any(button.property("active") for button in buttons))
+
+    def test_peq_editors_can_hide_without_removing_state_or_creating_outer_scroll(self) -> None:
+        window = self.make_window()
+        self.addCleanup(self.app.processEvents)
+        self.addCleanup(window.hide)
+        window.show()
+        window.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        global_body = window.findChild(QtWidgets.QWidget, "globalPeqBody")
+        speaker_body = window.findChild(QtWidgets.QWidget, "speakerPeqBody")
+        presets_page = window.findChild(QtWidgets.QWidget, "presetsPage")
+        outer_scroll = next(
+            scroll for scroll in presets_page.findChildren(QtWidgets.QScrollArea)
+            if scroll.parentWidget() is presets_page
+        )
+
+        self.assertIsNotNone(global_body)
+        self.assertIsNotNone(speaker_body)
+        self.assertEqual(window.global_peq_visibility_button.text(), "Hide")
+        self.assertEqual(window.speaker_eq_visibility_button.text(), "Hide")
+
+        window.global_peq_text.setPlainText("Preamp: -3 dB")
+        window.global_peq_visibility_button.click()
+        self.app.processEvents()
+
+        self.assertFalse(global_body.isVisible())
+        self.assertTrue(speaker_body.isVisible())
+        self.assertEqual(window.global_peq_visibility_button.text(), "Show")
+        self.assertEqual(window.global_peq_text.toPlainText(), "Preamp: -3 dB")
+        self.assertEqual(outer_scroll.verticalScrollBar().maximum(), 0)
+
+    def test_dsp_order_helper_uses_title_case_and_removes_unsupported_warning(self) -> None:
+        window = self.make_window()
+        helper_text = "\n".join(
+            label.text()
+            for label in window.findChild(QtWidgets.QWidget, "presetsPage").findChildren(QtWidgets.QLabel, "peqHelper")
+        )
+
+        self.assertIn("DSP Order:", helper_text)
+        self.assertIn("Matrix/Downmix -> Master Preamp -> User/Global PEQ", helper_text)
+        self.assertNotIn("Unsupported lines are ignored", helper_text)
+
     def test_peq_routing_state_persists_and_restores_from_preset(self) -> None:
         saved: list[dict[str, object]] = []
         window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION}, saved)
