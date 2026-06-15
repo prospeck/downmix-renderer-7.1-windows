@@ -24,6 +24,8 @@ class AudioDevice:
     native_direction: str | None = None
     native_is_default: bool = False
     native_ambiguous: bool = False
+    native_input_endpoint_id: str | None = None
+    native_output_endpoint_id: str | None = None
 
     @property
     def input_label(self) -> str:
@@ -49,9 +51,10 @@ class AudioDevice:
             "max_output_channels": self.max_output_channels,
             "default_samplerate": self.default_samplerate,
         }
-        if self.native_endpoint_id:
-            identity["native_endpoint_id"] = self.native_endpoint_id
-            identity["native_direction"] = self.native_direction or mode
+        endpoint = self.native_endpoint_for(mode)
+        if endpoint:
+            identity["native_endpoint_id"] = endpoint
+            identity["native_direction"] = mode
             identity["native_is_default"] = self.native_is_default
         if self.native_ambiguous:
             identity["native_ambiguous"] = True
@@ -59,6 +62,15 @@ class AudioDevice:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    def native_endpoint_for(self, mode: str) -> str | None:
+        if mode == "input" and self.native_input_endpoint_id:
+            return self.native_input_endpoint_id
+        if mode == "output" and self.native_output_endpoint_id:
+            return self.native_output_endpoint_id
+        if self.native_endpoint_id and self.native_direction in (None, "", mode):
+            return self.native_endpoint_id
+        return None
 
 
 def list_devices(force_refresh: bool = False) -> list[AudioDevice]:
@@ -75,8 +87,14 @@ def list_devices(force_refresh: bool = False) -> list[AudioDevice]:
         name = str(dev["name"])
         max_input_channels = int(dev["max_input_channels"])
         max_output_channels = int(dev["max_output_channels"])
-        direction = "input" if max_input_channels >= max_output_channels else "output"
-        descriptor = native_by_key.get((name, direction))
+        input_descriptor = native_by_key.get((name, "input")) if max_input_channels > 0 else None
+        output_descriptor = native_by_key.get((name, "output")) if max_output_channels > 0 else None
+        descriptor = input_descriptor or output_descriptor
+        if input_descriptor and output_descriptor:
+            descriptor = None
+        native_ambiguous = bool(input_descriptor and input_descriptor.get("ambiguous")) or bool(
+            output_descriptor and output_descriptor.get("ambiguous")
+        )
         devices.append(
             AudioDevice(
                 id=device_id,
@@ -92,7 +110,9 @@ def list_devices(force_refresh: bool = False) -> list[AudioDevice]:
                 native_endpoint_id=descriptor.get("endpoint_id") if descriptor else None,
                 native_direction=descriptor.get("direction") if descriptor else None,
                 native_is_default=bool(descriptor.get("is_default")) if descriptor else False,
-                native_ambiguous=bool(descriptor.get("ambiguous")) if descriptor else False,
+                native_ambiguous=native_ambiguous,
+                native_input_endpoint_id=input_descriptor.get("endpoint_id") if input_descriptor else None,
+                native_output_endpoint_id=output_descriptor.get("endpoint_id") if output_descriptor else None,
             )
         )
     return devices
@@ -155,6 +175,16 @@ def _is_vb_cable_name(name: str) -> bool:
     return is_vb_virtual_cable or is_renamed_16ch_cable
 
 
+def is_virtual_cable_output(device: AudioDevice | None) -> bool:
+    if device is None:
+        return False
+    return (
+        device.hostapi == WASAPI_HOSTAPI
+        and device.max_output_channels >= 2
+        and _is_vb_cable_name(device.name)
+    )
+
+
 def _is_16_channel_vb_cable(device: AudioDevice, mode: str) -> bool:
     channels = device.max_input_channels if mode == "input" else device.max_output_channels
     return channels >= 16 and _is_vb_cable_name(device.name)
@@ -197,7 +227,7 @@ def find_saved_device(
     saved_endpoint = str(saved.get("native_endpoint_id") or "")
 
     if saved_endpoint:
-        endpoint_match = next((dev for dev in candidates if dev.native_endpoint_id == saved_endpoint), None)
+        endpoint_match = next((dev for dev in candidates if dev.native_endpoint_for(mode) == saved_endpoint), None)
         if endpoint_match is not None:
             return endpoint_match
 
@@ -262,6 +292,21 @@ def preferred_output(devices: Iterable[AudioDevice]) -> AudioDevice | None:
 
 
 def default_wasapi_output(devices: Iterable[AudioDevice]) -> AudioDevice | None:
+    device_list = list(devices)
+    native_default = next(
+        (
+            dev
+            for dev in device_list
+            if dev.hostapi == WASAPI_HOSTAPI
+            and dev.max_output_channels >= 2
+            and dev.native_is_default
+            and dev.native_endpoint_for("output")
+        ),
+        None,
+    )
+    if native_default is not None:
+        return native_default
+
     try:
         hostapis = sd.query_hostapis()
     except Exception:
@@ -276,7 +321,7 @@ def default_wasapi_output(devices: Iterable[AudioDevice]) -> AudioDevice | None:
             break
     if default_id is None:
         return None
-    return next((dev for dev in devices if dev.id == default_id), None)
+    return next((dev for dev in device_list if dev.id == default_id), None)
 
 
 def check_format_support(device_id: int, mode: str, channels: int, samplerate: int) -> tuple[bool, str]:

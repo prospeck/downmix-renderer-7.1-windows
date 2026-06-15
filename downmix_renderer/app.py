@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from time import monotonic
@@ -22,6 +24,7 @@ from .devices import (
     WASAPI_HOSTAPI,
     default_wasapi_output,
     find_saved_device,
+    is_virtual_cable_output,
     list_devices,
     preferred_input,
     preferred_output,
@@ -71,12 +74,20 @@ APP_HEADING = "DOWNMIX RENDERER"
 USER_VOLUME_SLIDER_MAX = 1000
 BASELINE_RECOVERY_VERSION = 1
 DEVICE_FORCE_REFRESH_INTERVAL = 3
+DEVICE_POLL_INTERVAL_MS = 500
 IDLE_RECOVERY_SECONDS = 2.5
 RECOVERY_COOLDOWN_SECONDS = 8.0
 RECOVERY_INPUT_ACTIVITY_THRESHOLD = 0.003
 RECOVERY_OUTPUT_SILENCE_THRESHOLD = 0.0005
+AUDIO_LIVENESS_TIMEOUT_MS = 360
+AUDIO_LIVENESS_REBUILD_LIMIT = 1
 GITHUB_URL = "https://github.com/prospeck/downmix-renderer-7.1-windows.git"
 APP_USER_MODEL_ID = "Taran.DownmixRenderer.DownmixRenderer"
+WM_SETICON = 0x0080
+ICON_SMALL = 0
+ICON_BIG = 1
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x0010
 GITHUB_MARK_SVG = """<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 0.296997C5.37 0.296997 0 5.67 0 12.297C0 17.6 3.438 22.097 8.205 23.682C8.805 23.795 9.025 23.424 9.025 23.105C9.025 22.82 9.015 22.065 9.01 21.065C5.672 21.789 4.968 19.455 4.968 19.455C4.422 18.07 3.633 17.7 3.633 17.7C2.546 16.956 3.717 16.971 3.717 16.971C4.922 17.055 5.555 18.207 5.555 18.207C6.625 20.042 8.364 19.512 9.05 19.205C9.158 18.429 9.467 17.9 9.81 17.6C7.145 17.3 4.344 16.268 4.344 11.67C4.344 10.36 4.809 9.29 5.579 8.45C5.444 8.147 5.039 6.927 5.684 5.274C5.684 5.274 6.689 4.952 8.984 6.504C9.944 6.237 10.964 6.105 11.984 6.099C13.004 6.105 14.024 6.237 14.984 6.504C17.264 4.952 18.269 5.274 18.269 5.274C18.914 6.927 18.509 8.147 18.389 8.45C19.154 9.29 19.619 10.36 19.619 11.67C19.619 16.28 16.814 17.295 14.144 17.59C14.564 17.95 14.954 18.686 14.954 19.81C14.954 21.416 14.939 22.706 14.939 23.096C14.939 23.411 15.149 23.786 15.764 23.666C20.565 22.092 24 17.592 24 12.297C24 5.67 18.627 0.296997 12 0.296997Z" fill="{color}"/></svg>"""
 
 BASE_STYLE = f"""
@@ -789,7 +800,9 @@ def refresh_icon(size: int = 22) -> QtGui.QIcon:
 
 
 class RouteRefreshButton(QtWidgets.QPushButton):
-    REFRESH_ANIMATION_MS = 315
+    SPINNER_MINIMUM_VISIBLE_MS = 520
+    SPINNER_SETTLE_FADE_MS = 150
+    REFRESH_ANIMATION_MS = SPINNER_MINIMUM_VISIBLE_MS
     has_premium_refresh_animation = True
     refresh_icon_stroke_width = 2.3
     refresh_icon_gap_degrees = 100
@@ -824,6 +837,7 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         self.setAttribute(QtCore.Qt.WA_Hover, True)
         self._refresh_progress = 0.0
         self._refresh_press_depth = 0.0
+        self._refresh_settle_alpha = 0.0
         self._refresh_animation_group = QtCore.QParallelAnimationGroup(self)
         self._refresh_animation = QtCore.QPropertyAnimation(self, b"refreshProgress", self._refresh_animation_group)
         self._refresh_animation.setDuration(self.REFRESH_ANIMATION_MS)
@@ -834,6 +848,10 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         self._refresh_animation_group.addAnimation(self._refresh_animation)
         self._refresh_animation_group.addAnimation(self._refresh_press_animation)
         self._refresh_animation_group.finished.connect(self._finish_refresh_animation)
+        self._refresh_settle_animation = QtCore.QPropertyAnimation(self, b"refreshSettleAlpha", self)
+        self._refresh_settle_animation.setDuration(self.SPINNER_SETTLE_FADE_MS)
+        self._refresh_settle_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._refresh_settle_animation.finished.connect(self._reset_after_refresh_settle)
         self.pressed.connect(self.animate_refresh)
 
     @property
@@ -886,11 +904,24 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         fset=_set_refresh_press_depth,
     )
 
+    def _set_refresh_settle_alpha(self, value: float) -> None:
+        self._refresh_settle_alpha = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    refreshSettleAlpha = QtCore.pyqtProperty(
+        float,
+        fget=lambda self: self._refresh_settle_alpha,
+        fset=_set_refresh_settle_alpha,
+    )
+
     def animate_refresh(self) -> None:
         if self._refresh_animation_group.state() == QtCore.QAbstractAnimation.Running:
             self._refresh_animation_group.stop()
+        if self._refresh_settle_animation.state() == QtCore.QAbstractAnimation.Running:
+            self._refresh_settle_animation.stop()
         self._set_refresh_progress(0.0)
         self._set_refresh_press_depth(0.0)
+        self._set_refresh_settle_alpha(0.0)
         self._refresh_animation.setStartValue(self._refresh_progress)
         self._refresh_animation.setEndValue(1.0)
         self._refresh_press_animation.setStartValue(0.0)
@@ -902,11 +933,23 @@ class RouteRefreshButton(QtWidgets.QPushButton):
     def cancel_refresh_animation(self) -> None:
         if self._refresh_animation_group.state() == QtCore.QAbstractAnimation.Running:
             self._refresh_animation_group.stop()
-        self._finish_refresh_animation()
-
-    def _finish_refresh_animation(self) -> None:
+        if self._refresh_settle_animation.state() == QtCore.QAbstractAnimation.Running:
+            self._refresh_settle_animation.stop()
         self._set_refresh_progress(0.0)
         self._set_refresh_press_depth(0.0)
+        self._set_refresh_settle_alpha(0.0)
+
+    def _finish_refresh_animation(self) -> None:
+        self._set_refresh_press_depth(0.0)
+        self._set_refresh_progress(self.refresh_wheel_hold_end)
+        self._set_refresh_settle_alpha(1.0)
+        self._refresh_settle_animation.setStartValue(1.0)
+        self._refresh_settle_animation.setEndValue(0.0)
+        self._refresh_settle_animation.start()
+
+    def _reset_after_refresh_settle(self) -> None:
+        self._set_refresh_progress(0.0)
+        self._set_refresh_settle_alpha(0.0)
 
     def hideEvent(self, event) -> None:
         self.cancel_refresh_animation()
@@ -917,7 +960,7 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         hover = self.underMouse() or self.hasFocus()
-        active = self.isDown() or self._refresh_progress > 0.01
+        active = self.isDown() or self._refresh_progress > 0.01 or self._refresh_settle_alpha > 0.01
 
         bg = QtGui.QColor("#101010" if self.isDown() else ("#090909" if hover or active else "#050505"))
         border = QtGui.QColor("#6a6a6a" if self.isDown() else ("#4a4a4a" if hover or active else "#252525"))
@@ -927,22 +970,48 @@ class RouteRefreshButton(QtWidgets.QPushButton):
 
         press = math.sin(math.pi * self._refresh_press_depth)
         center = rect.center() + QtCore.QPointF(0.0, 0.45 * press)
-        icon_color = self.refresh_glyph_color()
         painter.save()
         if press > 0.0:
             painter.translate(rect.center())
             scale = 1.0 - (0.035 * press)
             painter.scale(scale, scale)
             painter.translate(-rect.center())
-        _draw_refresh_glyph(
-            painter,
-            center,
-            self.refresh_icon_radius,
-            icon_color,
-            self.refresh_icon_stroke_width,
-            -self.refresh_spin_degrees * self._refresh_progress,
-            self.refresh_wheel_morph,
-        )
+        settle = self._refresh_settle_alpha
+        if settle > 0.001:
+            base_color = QtGui.QColor("#ffffff" if self.underMouse() or self.hasFocus() or self.isDown() else "#f0f4f3")
+            base_color.setAlpha(int(255 * (1.0 - settle)))
+            wheel_color = QtGui.QColor(self.refresh_wheel_accent_color)
+            wheel_color.setAlpha(int(255 * settle))
+            if base_color.alpha() > 0:
+                _draw_refresh_glyph(
+                    painter,
+                    center,
+                    self.refresh_icon_radius,
+                    base_color,
+                    self.refresh_icon_stroke_width,
+                    0.0,
+                    0.0,
+                )
+            if wheel_color.alpha() > 0:
+                _draw_refresh_glyph(
+                    painter,
+                    center,
+                    self.refresh_icon_radius,
+                    wheel_color,
+                    self.refresh_icon_stroke_width,
+                    -self.refresh_spin_degrees * self.refresh_wheel_hold_end,
+                    1.0,
+                )
+        else:
+            _draw_refresh_glyph(
+                painter,
+                center,
+                self.refresh_icon_radius,
+                self.refresh_glyph_color(),
+                self.refresh_icon_stroke_width,
+                -self.refresh_spin_degrees * self._refresh_progress,
+                self.refresh_wheel_morph,
+            )
         painter.restore()
         painter.end()
 
@@ -1392,8 +1461,6 @@ def apply_windows_dark_titlebar(widget: QtWidgets.QWidget) -> None:
     if sys.platform != "win32":
         return
     try:
-        import ctypes
-
         hwnd = int(widget.winId())
         dark = ctypes.c_int(1)
         black = ctypes.c_int(0x000000)
@@ -1403,6 +1470,57 @@ def apply_windows_dark_titlebar(widget: QtWidgets.QWidget) -> None:
             dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(dark), ctypes.sizeof(dark))
         dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(black), ctypes.sizeof(black))
         dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), ctypes.sizeof(text))
+    except Exception:
+        return
+
+
+def apply_windows_window_icons(widget: QtWidgets.QWidget, icon_path: Path) -> list[int]:
+    if sys.platform != "win32" or not icon_path.exists():
+        return []
+    try:
+        hwnd = int(widget.winId())
+        user32 = ctypes.windll.user32
+        _configure_windows_icon_api(user32)
+        handles: list[int] = []
+        for icon_kind, size in ((ICON_SMALL, 16), (ICON_BIG, 256)):
+            handle = int(user32.LoadImageW(None, str(icon_path), IMAGE_ICON, size, size, LR_LOADFROMFILE))
+            if not handle:
+                continue
+            user32.SendMessageW(hwnd, WM_SETICON, icon_kind, handle)
+            handles.append(handle)
+        return handles
+    except Exception:
+        return []
+
+
+def destroy_windows_icon_handles(handles: list[int]) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        _configure_windows_icon_api(user32)
+        for handle in handles:
+            if handle:
+                user32.DestroyIcon(handle)
+    except Exception:
+        return
+
+
+def _configure_windows_icon_api(user32: object) -> None:
+    try:
+        user32.LoadImageW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+        user32.SendMessageW.restype = ctypes.c_void_p
+        user32.DestroyIcon.argtypes = [ctypes.c_void_p]
+        user32.DestroyIcon.restype = ctypes.c_int
     except Exception:
         return
 
@@ -1534,7 +1652,8 @@ class DotBackdropDialog(QtWidgets.QDialog):
 class InfoButton(QtWidgets.QPushButton):
     def __init__(self) -> None:
         super().__init__("")
-        self.setObjectName("info")
+        self.setObjectName("headerIconButton")
+        self.setProperty("kind", "info")
         self.setToolTip("Renderer details")
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFixedSize(34, 34)
@@ -1808,6 +1927,10 @@ class TrimLineEdit(QtWidgets.QLineEdit):
 
 
 class VUMeter(QtWidgets.QWidget):
+    METER_ATTACK = 0.52
+    METER_DECAY = 0.12
+    PEAK_DECAY = 0.965
+
     def __init__(self, label: str) -> None:
         super().__init__()
         self.label = label
@@ -1819,9 +1942,9 @@ class VUMeter(QtWidgets.QWidget):
 
     def set_level(self, value: float) -> None:
         self.level = min(1.0, max(0.0, float(value)))
-        attack = 0.45 if self.level > self.display_level else 0.18
+        attack = self.METER_ATTACK if self.level > self.display_level else self.METER_DECAY
         self.display_level += (self.level - self.display_level) * attack
-        self.peak = max(self.level, self.peak * 0.965)
+        self.peak = max(self.level, self.peak * self.PEAK_DECAY)
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1868,6 +1991,8 @@ class StereoSumMeter(QtWidgets.QWidget):
     BAR_TOP_OFFSET = 40
     TICK_LABEL_OFFSET = 15
     FIXED_HEIGHT = CHANNEL_PANEL_HEIGHT * 2 + CHANNEL_PANEL_GAP + HELPER_TOP_GAP + HELPER_HEIGHT
+    METER_ATTACK = 0.56
+    METER_DECAY = 0.12
 
     def __init__(self) -> None:
         super().__init__()
@@ -1903,7 +2028,7 @@ class StereoSumMeter(QtWidgets.QWidget):
 
     @staticmethod
     def _smooth(current: float, target: float) -> float:
-        amount = 0.42 if target > current else 0.18
+        amount = StereoSumMeter.METER_ATTACK if target > current else StereoSumMeter.METER_DECAY
         return current + (target - current) * amount
 
     @staticmethod
@@ -1977,6 +2102,9 @@ class StereoSumMeter(QtWidgets.QWidget):
 
 
 class ChannelTile(QtWidgets.QWidget):
+    METER_ATTACK = 0.60
+    METER_DECAY = 0.11
+
     def __init__(self, name: str, source_index: int) -> None:
         super().__init__()
         self.name = name
@@ -1995,7 +2123,7 @@ class ChannelTile(QtWidgets.QWidget):
 
     def set_level(self, value: float) -> None:
         self.level = min(1.0, max(0.0, float(value)))
-        attack = 0.48 if self.level > self.display_level else 0.16
+        attack = self.METER_ATTACK if self.level > self.display_level else self.METER_DECAY
         self.display_level += (self.level - self.display_level) * attack
         self.update()
 
@@ -2043,6 +2171,9 @@ class ChannelTile(QtWidgets.QWidget):
 
 
 class RawChannelTile(QtWidgets.QWidget):
+    METER_ATTACK = 0.58
+    METER_DECAY = 0.12
+
     def __init__(self, name: str, source_index: int) -> None:
         super().__init__()
         self.name = name
@@ -2056,7 +2187,7 @@ class RawChannelTile(QtWidgets.QWidget):
     def set_levels(self, peak: float, rms: float) -> None:
         self.peak = min(1.0, max(0.0, float(peak)))
         self.rms = min(1.0, max(0.0, float(rms)))
-        attack = 0.46 if self.peak > self.display_peak else 0.14
+        attack = self.METER_ATTACK if self.peak > self.display_peak else self.METER_DECAY
         self.display_peak += (self.peak - self.display_peak) * attack
         self.update()
 
@@ -2507,9 +2638,10 @@ class RoomVisualizer(QtWidgets.QWidget):
 
 
 class RawMonitorDialog(DotBackdropDialog):
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, config_id: str | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Raw 16ch Monitor")
+        self.channel_config = self._normalize_config(config_id or str(getattr(parent, "channel_config", DEFAULT_CHANNEL_CONFIG)))
+        self.setWindowTitle("Raw Monitor")
         self.setWindowFlags(
             QtCore.Qt.Window
             | QtCore.Qt.WindowTitleHint
@@ -2523,19 +2655,54 @@ class RawMonitorDialog(DotBackdropDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
-        layout.addWidget(section_label("Raw 16ch Monitor"))
+        layout.addWidget(section_label("Raw Monitor"))
 
-        grid = QtWidgets.QGridLayout()
-        grid.setContentsMargins(12, 12, 12, 12)
-        grid.setHorizontalSpacing(7)
-        grid.setVerticalSpacing(7)
+        self.grid = QtWidgets.QGridLayout()
+        self.grid.setContentsMargins(12, 12, 12, 12)
+        self.grid.setHorizontalSpacing(7)
+        self.grid.setVerticalSpacing(7)
         self.tiles: list[RawChannelTile] = []
-        names = tuple(CHANNEL_LAYOUTS["sharur_9_1_6"]["names"])
-        for index, name in enumerate(names):
-            tile = RawChannelTile(str(name), index)
-            grid.addWidget(tile, index // 4, index % 4)
+        self._rebuild_tiles()
+        layout.addWidget(card(self.grid), 1)
+
+    @staticmethod
+    def _normalize_config(config_id: str) -> str:
+        return config_id if config_id in CHANNEL_LAYOUTS else DEFAULT_CHANNEL_CONFIG
+
+    def set_channel_config(self, config_id: str) -> None:
+        config_id = self._normalize_config(config_id)
+        if config_id == self.channel_config and self.tiles:
+            return
+        was_visible = self.isVisible()
+        was_active = self.isActiveWindow()
+        prior_geometry = QtCore.QRect(self.geometry())
+        prior_state = self.windowState()
+        self.channel_config = config_id
+        self._rebuild_tiles()
+        if was_visible:
+            self.setGeometry(prior_geometry)
+            self.setWindowState(prior_state)
+            if not (prior_state & QtCore.Qt.WindowMinimized) and self.isMinimized():
+                self.showNormal()
+            self.show()
+            if was_active:
+                self.raise_()
+                self.activateWindow()
+
+    def _rebuild_tiles(self) -> None:
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.tiles = []
+        layout = CHANNEL_LAYOUTS[self.channel_config]
+        names = tuple(layout["names"])
+        indices = tuple(layout["indices"])
+        for index, (name, source_index) in enumerate(zip(names, indices)):
+            tile = RawChannelTile(str(name), int(source_index))
+            self.grid.addWidget(tile, index // 4, index % 4)
             self.tiles.append(tile)
-        layout.addWidget(card(grid), 1)
 
     def set_levels(self, peaks: object, rms_values: object) -> None:
         for tile in self.tiles:
@@ -2565,46 +2732,18 @@ class RouteProbeWorker(QtCore.QObject):
 
 DETAIL_SECTIONS = (
     (
-        "Session",
+        "Important Details",
         (
-            ("Render", "Starts or stops the live stereo render path."),
-            ("Output keep-alive", "Keeps the selected output awake while rendering is stopped."),
-            ("Smart Switching", "Follows matching saved profiles when the Windows output changes."),
-            ("Auto-start on Boot", "Controls the Windows startup launcher."),
-        ),
-    ),
-    (
-        "Route And Profiles",
-        (
-            ("Input / Output", "Fixed multichannel capture into the selected stereo playback device."),
-            ("Saved Profiles", "Stores route, gain, layout, PEQ, correction, and swap state."),
-            ("Profile Control", "Creates, updates, renames, loads, and deletes saved profiles."),
-        ),
-    ),
-    (
-        "Gain And Field",
-        (
-            ("Preamp", "Sets renderer headroom before PEQ and output limiting."),
-            ("7.1", "Uses the compact 7.1 monitor field."),
-            ("9.1.6 Monitor", "Uses the full 16-channel monitor field."),
-            ("Room View", "Switches between 3D and top-down channel views."),
-        ),
-    ),
-    (
-        "PEQ And Correction",
-        (
-            ("User PEQ", "Applies shared stereo PEQ before output swap and correction."),
-            ("Speaker EQ", "Applies independent left/right correction after output swap."),
-            ("L/R Swap", "Swaps physical stereo outputs while preserving correction assignment."),
-            ("Signal Order", "Downmix, preamp, user PEQ, swap, speaker EQ, limiter, output."),
-        ),
-    ),
-    (
-        "Tools",
-        (
-            ("7.1 Upmix", "Enables the 7.1 fill stage."),
-            ("9.1.6 Upmix", "Enables the height-field generation stage."),
-            ("Raw Monitor", "Opens raw 16-channel peak/RMS monitoring."),
+            (
+                "Sound Enhancer",
+                "Sound Enhancer increases loudness for quiet laptop speakers while protecting against clipping. "
+                "It does not resample or intentionally degrade audio, but very loud tracks may be gently limited for safety.",
+            ),
+            ("Smart Switching", "Matches the active Windows output to a saved profile when the output device changes."),
+            ("User / Global PEQ", "Lets you shape the overall tonal balance with your own parametric EQ."),
+            ("L-R Correction", "Corrects or aligns left and right channel balance for the selected output."),
+            ("Keep Output Awake", "Keeps the selected output endpoint open with silence while rendering is stopped."),
+            ("GitHub", "Visit GitHub to download the latest releases, and star the repo if the app is useful."),
         ),
     ),
 )
@@ -2613,37 +2752,40 @@ DETAIL_SECTIONS = (
 def build_details_body() -> QtWidgets.QWidget:
     body = QtWidgets.QWidget()
     body.setObjectName("rendererDetailsBody")
+    body.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
     body_layout = QtWidgets.QVBoxLayout(body)
-    body_layout.setContentsMargins(0, 0, 4, 0)
-    body_layout.setSpacing(10)
+    body_layout.setContentsMargins(0, 0, 0, 0)
+    body_layout.setSpacing(0)
 
     for title, rows in DETAIL_SECTIONS:
         section = QtWidgets.QVBoxLayout()
-        section.setContentsMargins(12, 11, 12, 12)
-        section.setSpacing(7)
+        section.setContentsMargins(13, 12, 13, 13)
+        section.setSpacing(8)
         section.addWidget(section_label(title))
 
         for name, detail in rows:
             row_widget = QtWidgets.QWidget()
             row_widget.setObjectName("detailsRow")
-            row_widget.setMinimumHeight(24)
+            row_widget.setMinimumHeight(26)
+            row_widget.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
             row_layout = QtWidgets.QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 1, 0, 1)
-            row_layout.setSpacing(14)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(16)
 
             name_label = QtWidgets.QLabel(name)
             name_label.setObjectName("detailsName")
             name_label.setFixedWidth(158)
             name_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            name_label.setMinimumHeight(22)
+            name_label.setMinimumHeight(24)
             name_label.setStyleSheet(f"color:{TEXT}; font-weight:650; background-color: transparent; padding: 0px;")
 
             detail_label = QtWidgets.QLabel(detail)
             detail_label.setObjectName("detailsDescription")
             detail_label.setWordWrap(True)
             detail_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            detail_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
-            detail_label.setMinimumHeight(22)
+            detail_label.setFixedWidth(488)
+            detail_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
+            detail_label.setMinimumHeight(24)
             detail_label.setStyleSheet(f"color:{MID}; font-size:11px; background-color: transparent; padding: 0px;")
 
             row_layout.addWidget(name_label, 0)
@@ -2652,7 +2794,6 @@ def build_details_body() -> QtWidgets.QWidget:
 
         body_layout.addWidget(card(section))
 
-    body_layout.addStretch()
     return body
 
 
@@ -2667,6 +2808,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.setMinimumSize(1120, 925)
         self.resize(1212, self.minimumHeight())
         self.setStyleSheet(BASE_STYLE)
+        self._windows_icon_handles: list[int] = []
         self._set_icon()
         self.setMouseTracking(True)
         self._closing_with_animation = False
@@ -2713,6 +2855,7 @@ class RendererWindow(QtWidgets.QWidget):
                 self.settings.get("was_running", False),
             )
         )
+        self._paused_for_direct_output = False
         self._app_root = Path(__file__).resolve().parents[1]
         self._device_poll_count = 0
         self.raw_monitor_dialog: RawMonitorDialog | None = None
@@ -2722,6 +2865,11 @@ class RendererWindow(QtWidgets.QWidget):
         self._last_callback_status_count = 0
         self._silent_input_started_at: float | None = None
         self._last_audio_recovery_at = -RECOVERY_COOLDOWN_SECONDS
+        self._audio_start_generation = 0
+        self._liveness_rebuilds = 0
+        self._device_lifecycle_events: list[str] = []
+        self._device_diagnostics_enabled = os.environ.get("DOWNMIX_RENDERER_DIAGNOSTICS", "").strip() == "1"
+        self._device_lifecycle_log_path = self._app_root / "device_lifecycle.log"
         self._peq_generation = 0
         self._last_peq_report = PeqParseReport()
         self._peq_apply_timer = QtCore.QTimer(self)
@@ -2753,6 +2901,7 @@ class RendererWindow(QtWidgets.QWidget):
         self._sync_input_device_presentation()
         self._wire_events()
         self._sync_keep_output_awake()
+        self._repair_system_boot_autostart()
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_ui)
@@ -2760,7 +2909,7 @@ class RendererWindow(QtWidgets.QWidget):
 
         self.device_timer = QtCore.QTimer(self)
         self.device_timer.timeout.connect(self.poll_devices)
-        self.device_timer.start(1500)
+        self.device_timer.start(DEVICE_POLL_INTERVAL_MS)
 
         self.backdrop_timer = QtCore.QTimer(self)
         self.backdrop_timer.timeout.connect(self._advance_backdrop)
@@ -2812,6 +2961,7 @@ class RendererWindow(QtWidgets.QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._apply_windows_dark_titlebar()
+        self._apply_windows_window_icons()
         if self._shown_with_animation:
             return
         self._shown_with_animation = True
@@ -2826,6 +2976,8 @@ class RendererWindow(QtWidgets.QWidget):
             self.engine.close()
             self._animate_opacity(self.windowOpacity(), 0.0, 130, QtCore.QEasingCurve.InCubic, self.close)
             return
+        destroy_windows_icon_handles(self._windows_icon_handles)
+        self._windows_icon_handles = []
         super().closeEvent(event)
 
     def _animate_opacity(
@@ -2866,9 +3018,15 @@ class RendererWindow(QtWidgets.QWidget):
         icon_path = self._icon_asset_path()
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
+            self._apply_windows_window_icons()
 
     def _apply_windows_dark_titlebar(self) -> None:
         apply_windows_dark_titlebar(self)
+
+    def _apply_windows_window_icons(self) -> None:
+        if self._windows_icon_handles:
+            return
+        self._windows_icon_handles = apply_windows_window_icons(self, self._icon_asset_path())
 
     def _audio_recovery_bool(self, key: str, default: bool) -> bool:
         if self._settings_need_audio_recovery:
@@ -3133,7 +3291,7 @@ class RendererWindow(QtWidgets.QWidget):
         eq_row = QtWidgets.QHBoxLayout()
         eq_row.setSpacing(10)
         global_peq_panel = self._build_peq_editor_panel("User / Global PEQ", "global")
-        speaker_eq_panel = self._build_peq_editor_panel("Speaker EQ / L-R Correction", "speaker")
+        speaker_eq_panel = self._build_peq_editor_panel("L-R Correction", "speaker")
         for panel in (global_peq_panel, speaker_eq_panel):
             panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         eq_row.addWidget(global_peq_panel, 1)
@@ -3142,7 +3300,7 @@ class RendererWindow(QtWidgets.QWidget):
 
         footer = QtWidgets.QLabel(
             "DSP Order: Matrix/Downmix -> Master Preamp -> User/Global PEQ -> L/R Swap -> "
-            "Speaker EQ/L-R Correction -> Channel Trim -> Sound Enhancer -> Limiter/Output."
+            "L-R Correction -> Channel Trim -> Sound Enhancer -> Limiter/Output."
         )
         footer.setObjectName("peqHelper")
         footer.setWordWrap(True)
@@ -3153,9 +3311,9 @@ class RendererWindow(QtWidgets.QWidget):
         mapping_layout = QtWidgets.QVBoxLayout()
         mapping_layout.setContentsMargins(10, 8, 10, 8)
         mapping_layout.setSpacing(5)
-        mapping_layout.addWidget(section_label("Speaker EQ Channel Mapping"))
+        mapping_layout.addWidget(section_label("L-R Correction Channel Mapping"))
         mapping_helper = QtWidgets.QLabel(
-            "Speaker EQ is applied after L/R swap. Swap off maps CH:0 to left and CH:1 to right; "
+            "L-R Correction is applied after L/R swap. Swap off maps CH:0 to left and CH:1 to right; "
             "swap on maps CH:1 to left and CH:0 to right."
         )
         mapping_helper.setObjectName("peqHelper")
@@ -3194,7 +3352,7 @@ class RendererWindow(QtWidgets.QWidget):
             controls.addWidget(group, 1)
         panel_layout.addLayout(controls)
         trim_helper = QtWidgets.QLabel(
-            "Quick fine-tuning for output level L/R imbalance. If Speaker EQ or L/R Correction is enabled, "
+            "Quick fine-tuning for output level L/R imbalance. If L-R Correction is enabled, "
             "do not use the channel trim setting."
         )
         trim_helper.setObjectName("peqHelper")
@@ -3478,7 +3636,7 @@ class RendererWindow(QtWidgets.QWidget):
 
         toggle_grid = QtWidgets.QGridLayout()
         toggle_grid.setHorizontalSpacing(12)
-        toggle_grid.setVerticalSpacing(11)
+        toggle_grid.setVerticalSpacing(8)
         toggle_grid.addWidget(self.surround_fill_checkbox, 0, 0)
         toggle_grid.addWidget(self.upmix916_checkbox, 0, 1)
         toggle_grid.addWidget(self.sound_enhancer_checkbox, 1, 0, 1, 2)
@@ -3645,27 +3803,21 @@ class RendererWindow(QtWidgets.QWidget):
     def show_feature_help(self) -> None:
         dialog = DotBackdropDialog(self)
         dialog.setWindowTitle("Renderer Details")
-        dialog.setMinimumSize(760, 620)
-        dialog.resize(800, 660)
+        dialog.setSizeGripEnabled(False)
         layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         heading = QtWidgets.QLabel("Renderer Details")
         heading.setObjectName("title")
+        heading.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         layout.addWidget(heading)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         body = build_details_body()
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
-
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
+        layout.addWidget(body, 0)
+        dialog.adjustSize()
+        dialog.setFixedSize(dialog.sizeHint())
         dialog.exec_()
 
     def open_github(self) -> None:
@@ -3736,8 +3888,10 @@ class RendererWindow(QtWidgets.QWidget):
             "lr_swap_enabled": bool(self.lr_swap_checkbox.isChecked()) if hasattr(self, "lr_swap_checkbox") else False,
             "global_peq_enabled": bool(self.global_peq_checkbox.isChecked()) if hasattr(self, "global_peq_checkbox") else False,
             "global_peq_text": self.global_peq_text.toPlainText() if hasattr(self, "global_peq_text") else "",
+            "global_peq_visible": bool(self.global_peq_body.isVisible()) if hasattr(self, "global_peq_body") else True,
             "speaker_eq_enabled": bool(self.speaker_eq_checkbox.isChecked()) if hasattr(self, "speaker_eq_checkbox") else False,
             "speaker_eq_text": self.speaker_eq_text.toPlainText() if hasattr(self, "speaker_eq_text") else "",
+            "speaker_eq_visible": bool(self.speaker_peq_body.isVisible()) if hasattr(self, "speaker_peq_body") else True,
             "trim_left_db": self.trim_left_edit.value_db() if hasattr(self, "trim_left_edit") else 0.0,
             "trim_right_db": self.trim_right_edit.value_db() if hasattr(self, "trim_right_edit") else 0.0,
         }
@@ -3748,8 +3902,10 @@ class RendererWindow(QtWidgets.QWidget):
         lr_swap_enabled: bool = False,
         global_peq_enabled: bool = False,
         global_peq_text: str = "",
+        global_peq_visible: bool = True,
         speaker_eq_enabled: bool = False,
         speaker_eq_text: str = "",
+        speaker_eq_visible: bool = True,
         trim_left_db: float = 0.0,
         trim_right_db: float = 0.0,
     ) -> None:
@@ -3777,6 +3933,8 @@ class RendererWindow(QtWidgets.QWidget):
         self.global_peq_text.setPlainText(str(global_peq_text or ""))
         self.speaker_eq_text.setPlainText(str(speaker_eq_text or ""))
         del blockers
+        self._set_peq_editor_visibility("global", bool(global_peq_visible), persist=False)
+        self._set_peq_editor_visibility("speaker", bool(speaker_eq_visible), persist=False)
         self._set_trim_controls_from_values(trim_left_db=trim_left_db, trim_right_db=trim_right_db)
 
     def _set_trim_controls_from_values(self, *, trim_left_db: float = 0.0, trim_right_db: float = 0.0) -> None:
@@ -3796,8 +3954,10 @@ class RendererWindow(QtWidgets.QWidget):
             lr_swap_enabled=bool(self.settings.get("lr_swap_enabled", False)),
             global_peq_enabled=bool(self.settings.get("global_peq_enabled", False)),
             global_peq_text=str(self.settings.get("global_peq_text") or ""),
+            global_peq_visible=bool(self.settings.get("global_peq_visible", True)),
             speaker_eq_enabled=bool(self.settings.get("speaker_eq_enabled", False)),
             speaker_eq_text=str(self.settings.get("speaker_eq_text") or ""),
+            speaker_eq_visible=bool(self.settings.get("speaker_eq_visible", True)),
             trim_left_db=clamp_trim_db(self.settings.get("trim_left_db", 0.0)),
             trim_right_db=clamp_trim_db(self.settings.get("trim_right_db", 0.0)),
         )
@@ -3868,7 +4028,7 @@ class RendererWindow(QtWidgets.QWidget):
             if config.lr_swap_enabled:
                 speaker_status += " | swap mapping on"
         elif config.lr_swap_enabled:
-            speaker_status = "Speaker EQ bypassed | L/R swap on"
+            speaker_status = "L-R Correction bypassed | L/R swap on"
 
         self.global_peq_status_label.setText(global_status + warning_suffix)
         self.speaker_eq_status_label.setText(speaker_status + warning_suffix)
@@ -3900,7 +4060,7 @@ class RendererWindow(QtWidgets.QWidget):
             detail = last_error or exc
             self._set_status(f"PEQ load failed: {detail}", "error")
 
-    def _toggle_peq_editor_visibility(self, kind: str) -> None:
+    def _set_peq_editor_visibility(self, kind: str, visible: bool, persist: bool = True) -> None:
         if kind == "global":
             body = getattr(self, "global_peq_body", None)
             button = getattr(self, "global_peq_visibility_button", None)
@@ -3909,9 +4069,20 @@ class RendererWindow(QtWidgets.QWidget):
             button = getattr(self, "speaker_eq_visibility_button", None)
         if body is None or button is None:
             return
-        next_visible = not body.isVisible()
+        next_visible = bool(visible)
         body.setVisible(next_visible)
         button.setText("Hide" if next_visible else "Show")
+        if persist and not self._restoring:
+            self._persist_state(was_running=self.engine.snapshot().running)
+
+    def _toggle_peq_editor_visibility(self, kind: str) -> None:
+        if kind == "global":
+            body = getattr(self, "global_peq_body", None)
+        else:
+            body = getattr(self, "speaker_peq_body", None)
+        if body is None:
+            return
+        self._set_peq_editor_visibility(kind, not body.isVisible(), persist=True)
 
     def _apply_launch_preset(self) -> None:
         active = self._preset_by_id(self.active_preset_id)
@@ -3985,8 +4156,10 @@ class RendererWindow(QtWidgets.QWidget):
             lr_swap_enabled=preset.lr_swap_enabled,
             global_peq_enabled=preset.global_peq_enabled,
             global_peq_text=preset.global_peq_text,
+            global_peq_visible=preset.global_peq_visible,
             speaker_eq_enabled=preset.speaker_eq_enabled,
             speaker_eq_text=preset.speaker_eq_text,
+            speaker_eq_visible=preset.speaker_eq_visible,
             trim_left_db=preset.trim_left_db,
             trim_right_db=preset.trim_right_db,
         )
@@ -4075,13 +4248,22 @@ class RendererWindow(QtWidgets.QWidget):
             self._restore_fallback_state()
 
     def set_system_boot_autostart(self, enabled: bool) -> None:
-        ok, detail = set_system_autostart(enabled, Path(__file__).resolve().parents[1])
+        ok, detail = set_system_autostart(enabled, self._app_root)
         if not ok:
             self.system_boot_checkbox.blockSignals(True)
             self.system_boot_checkbox.setChecked(is_system_autostart_enabled(self._app_root))
             self.system_boot_checkbox.blockSignals(False)
             self._set_status(f"Boot autostart: {detail}", "warning")
         self._persist_state(was_running=self.engine.snapshot().running)
+
+    def _repair_system_boot_autostart(self) -> None:
+        if not getattr(self, "system_boot_checkbox", None) or not self.system_boot_checkbox.isChecked():
+            return
+        if is_system_autostart_enabled(self._app_root):
+            return
+        ok, detail = set_system_autostart(True, self._app_root)
+        if not ok:
+            self._set_status(f"Boot autostart: {detail}", "warning")
 
     def set_channel_config(self, config_id: str, persist: bool = True) -> None:
         if config_id not in CHANNEL_LAYOUTS:
@@ -4095,6 +4277,8 @@ class RendererWindow(QtWidgets.QWidget):
         self._rebuild_channel_tiles()
         if hasattr(self, "room_visualizer"):
             self.room_visualizer.set_channel_config(self.channel_config)
+        if self.raw_monitor_dialog is not None:
+            self.raw_monitor_dialog.set_channel_config(self.channel_config)
         if persist and not self._restoring:
             self._persist_state(was_running=self.engine.snapshot().running)
 
@@ -4124,8 +4308,13 @@ class RendererWindow(QtWidgets.QWidget):
             self.tiles.append(tile)
 
     def _auto_start_if_needed(self) -> None:
-        if self._force_auto_start:
-            self.start_audio()
+        if not self._force_auto_start:
+            return
+        active_output = default_wasapi_output(self.all_devices)
+        if self._should_pause_for_direct_output(active_output):
+            self._pause_for_direct_output()
+            return
+        self.start_audio()
 
     def refresh_devices(self) -> None:
         was_running = self.engine.snapshot().running
@@ -4137,6 +4326,9 @@ class RendererWindow(QtWidgets.QWidget):
 
         signature = self._make_device_signature(fresh_all)
         route_changed = self._refresh_device_lists(fresh_all, signature)
+        active_output = default_wasapi_output(fresh_all)
+        self._last_default_output_id = active_output.id if active_output else None
+        self._sync_renderer_with_windows_default_output(active_output, was_running=was_running)
         if route_changed:
             self._recover_after_device_refresh(was_running)
         self._set_status("Devices refreshed", "running" if self.engine.snapshot().running else "neutral")
@@ -4165,6 +4357,7 @@ class RendererWindow(QtWidgets.QWidget):
         if active_id != self._last_default_output_id:
             self._last_default_output_id = active_id
             self._manual_override_default_id = None
+        self._sync_renderer_with_windows_default_output(active_output, was_running=was_running)
 
         if self._preset_by_id(self.active_preset_id) is not None:
             self._guard_missing_active_route()
@@ -4191,6 +4384,79 @@ class RendererWindow(QtWidgets.QWidget):
                 self._recover_after_device_refresh(was_running)
             return
         self.apply_preset(preset.id, start_after=self.engine.snapshot().running or self._force_auto_start, manual=False)
+
+    @staticmethod
+    def _should_pause_for_direct_output(active_output: AudioDevice | None) -> bool:
+        return active_output is not None and not is_virtual_cable_output(active_output)
+
+    def _pause_for_direct_output(self) -> None:
+        self._audio_start_generation += 1
+        self._log_device_lifecycle("pause_for_direct_output", generation=self._audio_start_generation)
+        if self.engine.snapshot().running:
+            self.engine.stop(resume_keep_awake=False)
+        self._paused_for_direct_output = True
+        self._force_auto_start = True
+        self._sync_keep_output_awake()
+        self._set_status("Paused for direct output", "neutral")
+        self._persist_state(was_running=False, auto_start=True)
+
+    def _sync_renderer_with_windows_default_output(self, active_output: AudioDevice | None, was_running: bool) -> bool:
+        if active_output is None:
+            return False
+        self._log_device_lifecycle(
+            "default_output_seen",
+            active=active_output.name,
+            direct=self._should_pause_for_direct_output(active_output),
+            was_running=was_running,
+        )
+        if is_virtual_cable_output(active_output):
+            if not self._paused_for_direct_output:
+                return False
+            self._paused_for_direct_output = False
+            self._sync_keep_output_awake()
+            if self._force_auto_start or was_running:
+                self.start_audio()
+            else:
+                self._set_status("Standby", "neutral")
+            return True
+        if self._paused_for_direct_output:
+            return False
+        if was_running or self.engine.snapshot().running or self._force_auto_start:
+            self._pause_for_direct_output()
+            return True
+        return False
+
+    def _fresh_default_output_for_restart_gate(self) -> AudioDevice | None:
+        try:
+            fresh_all = list_devices(force_refresh=True)
+        except Exception:
+            fresh_all = self.all_devices
+        else:
+            signature = self._make_device_signature(fresh_all)
+            if signature != self._device_signature:
+                self._refresh_device_lists(fresh_all, signature)
+            else:
+                self.all_devices = fresh_all
+                self.devices = [dev for dev in fresh_all if dev.hostapi == WASAPI_HOSTAPI]
+                self.device_by_id = {dev.id: dev for dev in self.devices}
+        active_output = default_wasapi_output(fresh_all)
+        active_id = active_output.id if active_output else None
+        if active_id != self._last_default_output_id:
+            self._last_default_output_id = active_id
+            self._manual_override_default_id = None
+        return active_output
+
+    def _automatic_restart_allowed(self, snapshot_running: bool) -> bool:
+        if not snapshot_running and not self._force_auto_start:
+            return False
+        active_output = self._fresh_default_output_for_restart_gate()
+        if active_output is None:
+            self._set_status("Waiting for Windows default output", "warning")
+            return False
+        if self._should_pause_for_direct_output(active_output):
+            self._sync_renderer_with_windows_default_output(active_output, was_running=snapshot_running)
+            return False
+        return is_virtual_cable_output(active_output)
 
     def _can_force_device_refresh(self) -> bool:
         if self._probe_thread is not None and self._probe_thread.isRunning():
@@ -4270,6 +4536,9 @@ class RendererWindow(QtWidgets.QWidget):
                 dev.max_output_channels,
                 dev.default_samplerate,
                 dev.native_endpoint_id,
+                dev.native_input_endpoint_id,
+                dev.native_output_endpoint_id,
+                dev.native_is_default,
                 dev.native_ambiguous,
             )
             for dev in devices
@@ -4311,6 +4580,8 @@ class RendererWindow(QtWidgets.QWidget):
             device.max_output_channels,
             device.default_samplerate,
             device.native_endpoint_id,
+            device.native_input_endpoint_id,
+            device.native_output_endpoint_id,
             device.native_direction,
             device.native_ambiguous,
         )
@@ -4412,7 +4683,7 @@ class RendererWindow(QtWidgets.QWidget):
         self._persist_state(was_running=False)
 
     def _recover_after_device_refresh(self, was_running: bool) -> None:
-        if not was_running or not self.engine.snapshot().running:
+        if self._paused_for_direct_output or not was_running or not self.engine.snapshot().running:
             return
         input_device = self._selected_device(self.input_combo)
         output_device = self._selected_device(self.output_combo)
@@ -4479,6 +4750,9 @@ class RendererWindow(QtWidgets.QWidget):
         if not hasattr(self, "keep_awake_checkbox"):
             return
         self.keep_output_awake_enabled = bool(self.keep_awake_checkbox.isChecked())
+        if getattr(self, "_paused_for_direct_output", False):
+            self.engine.set_keep_output_awake(False, None, sample_rate=self._resolved_sample_rate_for_current_route())
+            return
         self.engine.set_keep_output_awake(
             self.keep_output_awake_enabled,
             self._selected_device(self.output_combo),
@@ -4511,8 +4785,30 @@ class RendererWindow(QtWidgets.QWidget):
         if running:
             self.start_audio()
 
+    def _log_device_lifecycle(self, event: str, **fields: object) -> None:
+        timestamp = QtCore.QDateTime.currentDateTimeUtc().toString(QtCore.Qt.ISODateWithMs)
+        detail = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
+        line = f"{timestamp} {event}" + (f" {detail}" if detail else "")
+        self._device_lifecycle_events.append(line)
+        if len(self._device_lifecycle_events) > 400:
+            del self._device_lifecycle_events[: len(self._device_lifecycle_events) - 400]
+        if not self._device_diagnostics_enabled:
+            return
+        try:
+            with self._device_lifecycle_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception:
+            self._device_diagnostics_enabled = False
+
     def _reset_callback_window(self) -> None:
         self._last_callback_status_count = 0
+
+    def _stream_liveness_counters(self) -> tuple[int, int]:
+        snapshot = self.engine.snapshot()
+        return (
+            int(getattr(snapshot, "callback_invocation_count", 0) or 0),
+            int(getattr(snapshot, "processed_frame_count", 0) or 0),
+        )
 
     def _fallback_non_normal_on_warning(self, snapshot) -> bool:
         self._last_callback_status_count = snapshot.callback_status_count
@@ -4534,12 +4830,16 @@ class RendererWindow(QtWidgets.QWidget):
             "unplugged",
         )
         if any(marker in status_text for marker in invalid_markers):
-            return self._recover_audio_stream("Audio route recovered", now)
+            return self._recover_audio_stream(
+                "Audio route recovered",
+                now,
+                snapshot_running=bool(getattr(snapshot, "running", False)),
+            )
 
         if not getattr(snapshot, "running", False):
             self._silent_input_started_at = None
             if self._force_auto_start and any(marker in status_text for marker in ("stopped", "failed", "lost")):
-                return self._recover_audio_stream("Audio stream restarted", now)
+                return self._recover_audio_stream("Audio stream restarted", now, snapshot_running=False)
             return False
 
         dsp = snapshot.dsp
@@ -4559,16 +4859,25 @@ class RendererWindow(QtWidgets.QWidget):
                 self._silent_input_started_at = now
                 return False
             if now - self._silent_input_started_at >= IDLE_RECOVERY_SECONDS:
-                return self._recover_audio_stream("Audio stream self-healed", now)
+                return self._recover_audio_stream("Audio stream self-healed", now, snapshot_running=True)
             return False
 
         self._silent_input_started_at = None
         return False
 
-    def _recover_audio_stream(self, status: str, now: float | None = None) -> bool:
+    def _recover_audio_stream(
+        self,
+        status: str,
+        now: float | None = None,
+        snapshot_running: bool = False,
+    ) -> bool:
+        if not self._automatic_restart_allowed(snapshot_running):
+            self._silent_input_started_at = None
+            return False
         self._silent_input_started_at = None
         self._last_audio_recovery_at = monotonic() if now is None else now
         self._set_status(status, "warning")
+        self._log_device_lifecycle("watchdog_recover", status=status, snapshot_running=snapshot_running)
         self.start_audio()
         return True
 
@@ -4578,12 +4887,22 @@ class RendererWindow(QtWidgets.QWidget):
         else:
             self.start_audio()
 
-    def start_audio(self) -> None:
+    def start_audio(self, liveness_attempt: int = 0) -> None:
         input_device = self._selected_device(self.input_combo)
         output_device = self._selected_device(self.output_combo)
         if input_device is None or output_device is None:
             self._set_status("No WASAPI route", "error")
+            self._log_device_lifecycle("start_skipped_no_route")
             return
+        self._audio_start_generation += 1
+        generation = self._audio_start_generation
+        self._log_device_lifecycle(
+            "start_begin",
+            generation=generation,
+            input=input_device.name,
+            output=output_device.name,
+            attempt=liveness_attempt,
+        )
         try:
             self._apply_peq_routing_state(persist=False)
             requested_profile = DEFAULT_STREAM_PROFILE
@@ -4595,20 +4914,103 @@ class RendererWindow(QtWidgets.QWidget):
                 self._set_status(f"{STREAM_PROFILES[requested_profile]} unavailable; using {STREAM_PROFILES[actual_profile]}", "warning")
             else:
                 self._set_status("Running", "running")
+            self._paused_for_direct_output = False
             self._force_auto_start = True
             self._reset_callback_window()
             self._persist_state(was_running=True)
+            callbacks, frames = self._stream_liveness_counters()
+            self._log_device_lifecycle(
+                "start_complete",
+                generation=generation,
+                callbacks=callbacks,
+                frames=frames,
+                mmcss=bool(getattr(self.engine.snapshot(), "mmcss_registered", False)),
+            )
+            self._schedule_audio_liveness_check(generation, callbacks, frames, liveness_attempt)
         except Exception as exc:
             self._set_status(str(exc), "error")
+            self._log_device_lifecycle("start_failed", generation=generation, error=type(exc).__name__, detail=exc)
             self._sync_keep_output_awake()
             self._persist_state(was_running=False)
 
     def stop_audio(self) -> None:
+        self._paused_for_direct_output = False
+        self._audio_start_generation += 1
+        self._log_device_lifecycle("manual_stop", generation=self._audio_start_generation)
         self.engine.stop()
         self._sync_keep_output_awake()
         self._set_status("Stopped", "stopped")
         self._force_auto_start = False
         self._persist_state(was_running=False, auto_start=False)
+
+    def _schedule_audio_liveness_check(
+        self,
+        generation: int,
+        baseline_callbacks: int,
+        baseline_frames: int,
+        attempt: int,
+    ) -> None:
+        QtCore.QTimer.singleShot(
+            AUDIO_LIVENESS_TIMEOUT_MS,
+            lambda: self._verify_audio_liveness(generation, baseline_callbacks, baseline_frames, attempt),
+        )
+
+    def _verify_audio_liveness(
+        self,
+        generation: int,
+        baseline_callbacks: int,
+        baseline_frames: int,
+        attempt: int,
+    ) -> None:
+        if generation != self._audio_start_generation:
+            self._log_device_lifecycle(
+                "liveness_stale",
+                generation=generation,
+                active_generation=self._audio_start_generation,
+            )
+            return
+        snapshot = self.engine.snapshot()
+        if not getattr(snapshot, "running", False):
+            self._log_device_lifecycle("liveness_skipped_not_running", generation=generation)
+            return
+        callbacks = int(getattr(snapshot, "callback_invocation_count", 0) or 0)
+        frames = int(getattr(snapshot, "processed_frame_count", 0) or 0)
+        if callbacks > baseline_callbacks or frames > baseline_frames:
+            self._liveness_rebuilds = 0
+            self._log_device_lifecycle(
+                "liveness_ok",
+                generation=generation,
+                callbacks=callbacks,
+                frames=frames,
+            )
+            return
+        self._log_device_lifecycle(
+            "liveness_failed",
+            generation=generation,
+            callbacks=callbacks,
+            frames=frames,
+            attempt=attempt,
+        )
+        if attempt >= AUDIO_LIVENESS_REBUILD_LIMIT:
+            self._set_status("Audio stream failed liveness check", "warning")
+            return
+        self._rebuild_audio_after_failed_liveness(generation, attempt + 1)
+
+    def _rebuild_audio_after_failed_liveness(self, generation: int, attempt: int) -> None:
+        if generation != self._audio_start_generation:
+            return
+        self._liveness_rebuilds += 1
+        self._log_device_lifecycle("liveness_rebuild_begin", generation=generation, attempt=attempt)
+        active_output = self._fresh_default_output_for_restart_gate()
+        if active_output is not None and self._should_pause_for_direct_output(active_output):
+            self._sync_renderer_with_windows_default_output(active_output, was_running=True)
+            self._log_device_lifecycle("liveness_rebuild_paused_for_direct_output", active=active_output.name)
+            return
+        self._audio_start_generation += 1
+        self.engine.stop(resume_keep_awake=False)
+        self._sync_keep_output_awake()
+        self._log_device_lifecycle("liveness_rebuild_teardown_complete", generation=self._audio_start_generation)
+        self.start_audio(liveness_attempt=attempt)
 
     def update_ui(self) -> None:
         volume = self.engine.poll_volume()
@@ -4628,7 +5030,8 @@ class RendererWindow(QtWidgets.QWidget):
             self.room_visualizer.set_levels(dsp.channel_levels)
 
         if self.raw_monitor_dialog is not None and self.raw_monitor_dialog.isVisible():
-            self.raw_monitor_dialog.set_levels(dsp.raw_channel_levels, dsp.raw_channel_rms)
+            self.raw_monitor_dialog.set_channel_config(self.channel_config)
+            self.raw_monitor_dialog.set_levels(dsp.channel_levels, dsp.channel_rms)
 
         self.stereo_sum_meter.set_levels(dsp.left_meter, dsp.right_meter)
         sys_text = "Muted" if volume.muted else f"{volume.scalar * 100:.1f}%"
@@ -4702,9 +5105,9 @@ class RendererWindow(QtWidgets.QWidget):
         else:
             parts.append("User PEQ off")
         if self.speaker_eq_checkbox.isChecked():
-            parts.append(f"Speaker L/R {report.speaker_left_filter_count}/{report.speaker_right_filter_count}")
+            parts.append(f"L-R Correction {report.speaker_left_filter_count}/{report.speaker_right_filter_count}")
         else:
-            parts.append("Speaker EQ off")
+            parts.append("L-R Correction off")
         parts.append("Swap on" if self.lr_swap_checkbox.isChecked() else "Swap off")
         return " | ".join(parts)
 
@@ -4717,10 +5120,12 @@ class RendererWindow(QtWidgets.QWidget):
 
     def open_raw_monitor(self) -> None:
         if self.raw_monitor_dialog is None:
-            self.raw_monitor_dialog = RawMonitorDialog(None)
+            self.raw_monitor_dialog = RawMonitorDialog(None, self.channel_config)
             self.raw_monitor_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        else:
+            self.raw_monitor_dialog.set_channel_config(self.channel_config)
         dsp = self.engine.snapshot().dsp
-        self.raw_monitor_dialog.set_levels(dsp.raw_channel_levels, dsp.raw_channel_rms)
+        self.raw_monitor_dialog.set_levels(dsp.channel_levels, dsp.channel_rms)
         self.raw_monitor_dialog.show()
         self.raw_monitor_dialog.raise_()
         self.raw_monitor_dialog.activateWindow()

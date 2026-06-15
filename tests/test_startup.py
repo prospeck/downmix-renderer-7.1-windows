@@ -70,6 +70,51 @@ class StartupShortcutTests(unittest.TestCase):
                 with patch("downmix_renderer.startup._shortcut_target", return_value=missing_target):
                     self.assertFalse(startup.is_system_autostart_enabled(Path.cwd()))
 
+    def test_source_shortcut_config_prefers_production_testing_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as app_dir:
+            app_root = Path(app_dir)
+            executable = app_root / "production testing" / "Downmixrenderer.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("exe", encoding="utf-8")
+
+            with (
+                patch.object(startup.sys, "frozen", False, create=True),
+                patch.object(startup.sys, "executable", str(app_root / "python.exe")),
+            ):
+                target, arguments, working_directory, icon = startup._shortcut_config(app_root)
+
+            self.assertEqual(target, executable)
+            self.assertEqual(arguments, "")
+            self.assertEqual(working_directory, executable.parent)
+            self.assertEqual(icon, executable)
+
+    def test_enabled_shortcut_must_match_production_testing_executable_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as appdata, tempfile.TemporaryDirectory() as app_dir:
+            with patch.dict(os.environ, {"APPDATA": appdata}, clear=False):
+                app_root = Path(app_dir)
+                expected = app_root / "production testing" / "Downmixrenderer.exe"
+                stale = app_root / "testing" / "Downmixrenderer.exe"
+                expected.parent.mkdir(parents=True)
+                stale.parent.mkdir(parents=True)
+                expected.write_text("exe", encoding="utf-8")
+                stale.write_text("old exe", encoding="utf-8")
+                shortcut = startup.startup_script_path()
+                self.assertIsNotNone(shortcut)
+                shortcut.parent.mkdir(parents=True)
+                shortcut.write_text("shortcut", encoding="utf-8")
+
+                with (
+                    patch.object(startup.sys, "frozen", False, create=True),
+                    patch("downmix_renderer.startup._shortcut_target", return_value=stale),
+                ):
+                    self.assertFalse(startup.is_system_autostart_enabled(app_root))
+
+                with (
+                    patch.object(startup.sys, "frozen", False, create=True),
+                    patch("downmix_renderer.startup._shortcut_target", return_value=expected),
+                ):
+                    self.assertTrue(startup.is_system_autostart_enabled(app_root))
+
     def test_frozen_shortcut_config_uses_current_executable_location(self) -> None:
         with tempfile.TemporaryDirectory() as app_dir:
             executable = Path(app_dir) / "Finalised version 3" / "Downmixrenderer.exe"

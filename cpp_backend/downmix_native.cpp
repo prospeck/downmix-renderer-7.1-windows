@@ -14,6 +14,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace {
 
 constexpr int kSampleRate = 48000;
@@ -97,6 +103,7 @@ constexpr double kSoundEnhancerMakeupGain = 2.371373705661655; // +7.5 dB
 constexpr double kSoundEnhancerCeiling = 0.8912509381337456; // -1.0 dBFS
 constexpr double kSoundEnhancerAttackAlpha = 0.85;
 constexpr double kSoundEnhancerReleaseAlpha = 0.08;
+constexpr std::array<double, 3> kSoundEnhancerTruePeakFractions = {{0.25, 0.5, 0.75}};
 
 struct NativeDspSnapshot {
     float channelLevels[kInputChannels];
@@ -128,6 +135,9 @@ struct NativeEngineSnapshot {
     int32_t inputChannels;
     int32_t callbackStatusCount;
     int32_t dspErrorCount;
+    uint64_t callbackInvocationCount;
+    uint64_t processedFrameCount;
+    int32_t mmcssRegistered;
     float cpuLoad;
     float inputLatency;
     float outputLatency;
@@ -155,6 +165,87 @@ void copy_text(char (&dest)[N], const std::string& text) {
     std::memset(dest, 0, N);
     std::strncpy(dest, text.c_str(), N - 1);
 }
+
+#if defined(_WIN32)
+struct MmcssApi {
+    using SetCharacteristicsFn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    using SetPriorityFn = BOOL(WINAPI*)(HANDLE, int);
+    using RevertFn = BOOL(WINAPI*)(HANDLE);
+
+    HMODULE module = nullptr;
+    SetCharacteristicsFn setCharacteristics = nullptr;
+    SetPriorityFn setPriority = nullptr;
+    RevertFn revert = nullptr;
+    bool ready = false;
+};
+
+MmcssApi& mmcss_api() {
+    static MmcssApi api = [] {
+        MmcssApi loaded;
+        loaded.module = LoadLibraryW(L"Avrt.dll");
+        if (loaded.module == nullptr) {
+            return loaded;
+        }
+        loaded.setCharacteristics = reinterpret_cast<MmcssApi::SetCharacteristicsFn>(
+            GetProcAddress(loaded.module, "AvSetMmThreadCharacteristicsW")
+        );
+        loaded.setPriority = reinterpret_cast<MmcssApi::SetPriorityFn>(
+            GetProcAddress(loaded.module, "AvSetMmThreadPriority")
+        );
+        loaded.revert = reinterpret_cast<MmcssApi::RevertFn>(
+            GetProcAddress(loaded.module, "AvRevertMmThreadCharacteristics")
+        );
+        loaded.ready = loaded.setCharacteristics != nullptr;
+        return loaded;
+    }();
+    return api;
+}
+
+void prepare_mmcss_api() {
+    (void)mmcss_api();
+}
+
+struct MmcssThreadRegistration {
+    bool attempted = false;
+    HANDLE taskHandle = nullptr;
+
+    ~MmcssThreadRegistration() {
+        if (taskHandle == nullptr) {
+            return;
+        }
+        auto& api = mmcss_api();
+        if (api.revert != nullptr) {
+            api.revert(taskHandle);
+        }
+        taskHandle = nullptr;
+    }
+};
+
+bool register_current_thread_mmcss() {
+    thread_local MmcssThreadRegistration registration;
+    if (registration.attempted) {
+        return registration.taskHandle != nullptr;
+    }
+    registration.attempted = true;
+
+    auto& api = mmcss_api();
+    if (!api.ready) {
+        return false;
+    }
+    DWORD taskIndex = 0;
+    registration.taskHandle = api.setCharacteristics(L"Pro Audio", &taskIndex);
+    if (registration.taskHandle != nullptr && api.setPriority != nullptr) {
+        constexpr int kAvrtPriorityCritical = 2;
+        api.setPriority(registration.taskHandle, kAvrtPriorityCritical);
+    }
+    return registration.taskHandle != nullptr;
+}
+#else
+void prepare_mmcss_api() {}
+bool register_current_thread_mmcss() {
+    return false;
+}
+#endif
 
 void append_utf8_codepoint(std::string& out, uint32_t codepoint) {
     if (codepoint <= 0x7F) {
@@ -501,7 +592,7 @@ public:
 
     void set_sound_enhancer_enabled(bool enabled) {
         soundEnhancerEnabled_.store(enabled ? 1 : 0, std::memory_order_relaxed);
-        soundEnhancerSafetyGain_ = 1.0;
+        soundEnhancerResetPending_.store(1, std::memory_order_release);
         snapshotSoundEnhancerEnabled_.store(enabled ? 1 : 0, std::memory_order_relaxed);
         snapshotSoundEnhancerGain_.store(1.0f, std::memory_order_relaxed);
     }
@@ -554,7 +645,7 @@ public:
         hpX1_.fill(0.0);
         hpY1_.fill(0.0);
         lpY1_.fill(0.0);
-        soundEnhancerSafetyGain_ = 1.0;
+        soundEnhancerResetPending_.store(1, std::memory_order_release);
         snapshotLimiterGain_.store(1.0f, std::memory_order_relaxed);
         snapshotSoundEnhancerGain_.store(1.0f, std::memory_order_relaxed);
         snapshotClipping_.store(0, std::memory_order_relaxed);
@@ -673,6 +764,9 @@ public:
         }
         bool soundEnhancerLimited = false;
         double soundEnhancerGain = 1.0;
+        if (soundEnhancerResetPending_.exchange(0, std::memory_order_acq_rel) != 0) {
+            soundEnhancerSafetyGain_ = 1.0;
+        }
         if (soundEnhancerEnabled) {
             soundEnhancerGain = apply_sound_enhancer(frames, soundEnhancerLimited);
         } else {
@@ -814,16 +908,51 @@ private:
         return peak;
     }
 
+    static double catmull_rom_sample(double p0, double p1, double p2, double p3, double frac) {
+        const double frac2 = frac * frac;
+        const double frac3 = frac2 * frac;
+        return 0.5 * (
+            (2.0 * p1)
+            + ((-p0 + p2) * frac)
+            + ((2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * frac2)
+            + ((-p0 + 3.0 * p1 - 3.0 * p2 + p3) * frac3)
+        );
+    }
+
+    double estimated_true_peak_stereo(uint32_t frames) const {
+        double peak = peak_stereo(frames);
+        if (frames < 2) {
+            return peak;
+        }
+
+        for (int channel = 0; channel < kOutputChannels; ++channel) {
+            for (uint32_t frame = 0; frame + 1 < frames; ++frame) {
+                const size_t current = static_cast<size_t>(frame) * kOutputChannels + channel;
+                const size_t next = static_cast<size_t>(frame + 1) * kOutputChannels + channel;
+                const size_t prev = frame > 0 ? current - kOutputChannels : current;
+                const size_t after = frame + 2 < frames ? next + kOutputChannels : next;
+                const double p0 = stereo_[prev];
+                const double p1 = stereo_[current];
+                const double p2 = stereo_[next];
+                const double p3 = stereo_[after];
+                for (double frac : kSoundEnhancerTruePeakFractions) {
+                    peak = std::max(peak, std::abs(catmull_rom_sample(p0, p1, p2, p3, frac)));
+                }
+            }
+        }
+        return peak;
+    }
+
     double apply_sound_enhancer(uint32_t frames, bool& limited) {
         // Post-mix laptop-speaker loudness: fixed makeup gain, then a fast
-        // safety envelope at -1 dBFS before the final full-scale limiter.
+        // inter-sample safety envelope at -1 dBFS before the final limiter.
         // This deliberately leaves matrix, PEQ, trim, and routing math intact.
         limited = false;
         if (frames == 0) {
             return 1.0;
         }
 
-        const double peak = peak_stereo(frames);
+        const double peak = estimated_true_peak_stereo(frames);
         double targetSafetyGain = 1.0;
         if (peak > 1e-12) {
             const double boostedPeak = peak * kSoundEnhancerMakeupGain;
@@ -847,7 +976,7 @@ private:
             stereo_[stereoIndex + 1] *= appliedGain;
         }
 
-        const double postPeak = peak_stereo(frames);
+        const double postPeak = estimated_true_peak_stereo(frames);
         if (postPeak > kSoundEnhancerCeiling) {
             const double emergencyGain = kSoundEnhancerCeiling / postPeak;
             for (uint32_t frame = 0; frame < frames; ++frame) {
@@ -1522,6 +1651,7 @@ private:
     std::atomic<int32_t> upmix916Enabled_{0};
     std::atomic<int32_t> channelSanityEnabled_{0};
     std::atomic<int32_t> soundEnhancerEnabled_{0};
+    std::atomic<int32_t> soundEnhancerResetPending_{0};
     std::atomic<int32_t> monitorLayout_{0};
     std::atomic<int32_t> inputLayout_{0};
     double limiterGain_ = 1.0;
@@ -1575,6 +1705,7 @@ public:
         dsp_.set_sample_rate(sampleRate_);
         dsp_.reserve(static_cast<int>(safeBlockSize) * 8);
         dsp_.reset_runtime_state();
+        prepare_mmcss_api();
 
         ma_backend backends[] = {ma_backend_wasapi};
         ma_context_config contextConfig = ma_context_config_init();
@@ -1676,6 +1807,15 @@ public:
         }
         deviceReady_ = true;
 
+        dspErrorCount_.store(0, std::memory_order_relaxed);
+        callbackStatusCount_.store(0, std::memory_order_relaxed);
+        callbackInvocationCount_.store(0, std::memory_order_relaxed);
+        processedFrameCount_.store(0, std::memory_order_relaxed);
+        mmcssRegistered_.store(0, std::memory_order_relaxed);
+        mmcssAttempted_.store(0, std::memory_order_relaxed);
+        deviceNotificationType_.store(-1, std::memory_order_relaxed);
+        cpuLoad_.store(0.0f, std::memory_order_relaxed);
+
         result = ma_device_start(&device_);
         if (result != MA_SUCCESS) {
             lastError_ = "WASAPI stream start failed: " + std::to_string(result);
@@ -1684,10 +1824,6 @@ public:
         }
 
         running_.store(1, std::memory_order_release);
-        dspErrorCount_.store(0, std::memory_order_relaxed);
-        callbackStatusCount_.store(0, std::memory_order_relaxed);
-        deviceNotificationType_.store(-1, std::memory_order_relaxed);
-        cpuLoad_.store(0.0f, std::memory_order_relaxed);
         route_ = inputName_ + " (Windows WASAPI/C++) -> " + outputName_ + " (Windows WASAPI/C++)";
         status_ = "Running (C++ " + profileName_ + ")";
         return true;
@@ -1704,6 +1840,9 @@ public:
         out.inputChannels = out.running ? kInputChannels : 0;
         out.callbackStatusCount = callbackStatusCount_.load(std::memory_order_relaxed);
         out.dspErrorCount = dspErrorCount_.load(std::memory_order_relaxed);
+        out.callbackInvocationCount = callbackInvocationCount_.load(std::memory_order_relaxed);
+        out.processedFrameCount = processedFrameCount_.load(std::memory_order_relaxed);
+        out.mmcssRegistered = mmcssRegistered_.load(std::memory_order_relaxed);
         out.cpuLoad = cpuLoad_.load(std::memory_order_relaxed);
         out.inputLatency = static_cast<float>(blockSize_) / static_cast<float>(sampleRate_);
         out.outputLatency = static_cast<float>(blockSize_) / static_cast<float>(sampleRate_);
@@ -1747,6 +1886,13 @@ private:
         if (self == nullptr) {
             return;
         }
+        if (self->mmcssAttempted_.exchange(1, std::memory_order_relaxed) == 0) {
+            if (register_current_thread_mmcss()) {
+                self->mmcssRegistered_.store(1, std::memory_order_relaxed);
+            }
+        }
+        self->callbackInvocationCount_.fetch_add(1, std::memory_order_relaxed);
+        self->processedFrameCount_.fetch_add(frameCount, std::memory_order_relaxed);
         auto startTime = std::chrono::steady_clock::now();
         const bool ok = self->dsp_.process(
             static_cast<const float*>(input),
@@ -1822,6 +1968,10 @@ private:
     std::atomic<int32_t> running_{0};
     std::atomic<int32_t> dspErrorCount_{0};
     std::atomic<int32_t> callbackStatusCount_{0};
+    std::atomic<uint64_t> callbackInvocationCount_{0};
+    std::atomic<uint64_t> processedFrameCount_{0};
+    std::atomic<int32_t> mmcssRegistered_{0};
+    std::atomic<int32_t> mmcssAttempted_{0};
     std::atomic<int32_t> deviceNotificationType_{-1};
     std::atomic<float> cpuLoad_{0.0f};
 };

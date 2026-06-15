@@ -31,6 +31,9 @@ class EngineSnapshot:
     callback_status_count: int
     callback_status_time: float
     dsp_error_count: int
+    callback_invocation_count: int
+    processed_frame_count: int
+    mmcss_registered: bool
     cpu_load: float
     stream_latency: tuple[float, float] | None
     stream_profile: str
@@ -47,6 +50,7 @@ class OutputKeepAwake:
         self._device_id: int | None = None
         self._sample_rate = SAMPLE_RATE
         self._stream_sample_rate = SAMPLE_RATE
+        self._last_error = ""
 
     @property
     def enabled(self) -> bool:
@@ -55,6 +59,10 @@ class OutputKeepAwake:
     @property
     def active(self) -> bool:
         return self._stream is not None
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
 
     def set_enabled(
         self,
@@ -96,13 +104,15 @@ class OutputKeepAwake:
                 callback=self._callback,
             )
             stream.start()
-        except Exception:
+        except Exception as exc:
+            self._last_error = str(exc)
             if stream is not None:
                 _safe_close_stream(stream)
             return
         self._stream = stream
         self._device_id = output_device.id
         self._stream_sample_rate = self._sample_rate
+        self._last_error = ""
 
     def stop(self) -> None:
         stream = self._stream
@@ -114,6 +124,7 @@ class OutputKeepAwake:
 
     def close(self) -> None:
         self._enabled = False
+        self._last_error = ""
         self.stop()
 
     def _callback(self, outdata, frames, time, status) -> None:
@@ -175,6 +186,8 @@ class AudioEngine:
         self._callback_status_count = 0
         self._callback_status_time = 0.0
         self._dsp_error_count = 0
+        self._callback_invocation_count = 0
+        self._processed_frame_count = 0
         self._stream_profile = DEFAULT_STREAM_PROFILE
         self._sample_rate_mode = DEFAULT_SAMPLE_RATE_MODE
         self._sample_rate = SAMPLE_RATE
@@ -253,6 +266,8 @@ class AudioEngine:
             self._callback_status_count = 0
             self._callback_status_time = 0.0
             self._dsp_error_count = 0
+            self._callback_invocation_count = 0
+            self._processed_frame_count = 0
             self._stream_profile = active_profile
             self._sample_rate_mode = requested_sample_rate_mode
             self._sample_rate = sample_rate
@@ -342,6 +357,15 @@ class AudioEngine:
                 native_snapshot.callback_status_count if native_snapshot is not None else self._callback_status_count
             )
             dsp_error_count = native_snapshot.dsp_error_count if native_snapshot is not None else self._dsp_error_count
+            callback_invocation_count = (
+                native_snapshot.callback_invocation_count
+                if native_snapshot is not None
+                else self._callback_invocation_count
+            )
+            processed_frame_count = (
+                native_snapshot.processed_frame_count if native_snapshot is not None else self._processed_frame_count
+            )
+            mmcss_registered = native_snapshot.mmcss_registered if native_snapshot is not None else False
             stream_profile = native_snapshot.stream_profile if native_snapshot is not None else self._stream_profile
             sample_rate = self._sample_rate
             sample_rate_mode = self._sample_rate_mode
@@ -356,6 +380,9 @@ class AudioEngine:
                 callback_status_count=callback_status_count,
                 callback_status_time=self._callback_status_time,
                 dsp_error_count=dsp_error_count,
+                callback_invocation_count=callback_invocation_count,
+                processed_frame_count=processed_frame_count,
+                mmcss_registered=mmcss_registered,
                 cpu_load=cpu_load,
                 stream_latency=stream_latency,
                 stream_profile=stream_profile,
@@ -395,6 +422,8 @@ class AudioEngine:
         )
 
     def _callback(self, indata, outdata, frames, time, status) -> None:
+        self._callback_invocation_count += 1
+        self._processed_frame_count += int(frames)
         if status:
             status_text = str(status)
             now = monotonic()

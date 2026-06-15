@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,6 +71,12 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("--workpath build", source)
         self.assertIn("-Path $DistName", source)
         self.assertNotIn('Join-Path "dist" $DistName', source)
+
+    def test_icon_contains_standard_windows_taskbar_sizes(self) -> None:
+        icon_path = ROOT / "assets" / "downmix_renderer_logo.ico"
+
+        with Image.open(icon_path) as image:
+            self.assertTrue({(16, 16), (32, 32), (48, 48), (256, 256)}.issubset(image.ico.sizes()))
 
 
 if __name__ == "__main__":

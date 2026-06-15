@@ -610,6 +610,27 @@ class DspTests(unittest.TestCase):
         self.assertLess(snapshot.sound_enhancer_gain, 1.0)
         self.assertTrue(snapshot.clipping)
 
+    def test_sound_enhancer_limits_inter_sample_peak_estimate(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_sound_enhancer_enabled(True)
+        frames = DRY_DELAY_SAMPLES + 96
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        pattern = np.array([0.86956584, -0.8674835, -0.8719893, 0.7874929], dtype=np.float32)
+        repeated = np.resize(pattern, frames)
+        data[:, 0] = repeated
+        data[:, 1] = -repeated
+
+        out = processor.process(data)
+        snapshot = processor.snapshot()
+
+        self.assertLessEqual(float(np.max(np.abs(out))), 0.8914 + 1e-6)
+        self.assertLessEqual(
+            processor._estimate_true_peak_stereo(out, out.shape[0]),
+            0.8914 + 1e-6,
+        )
+        self.assertTrue(snapshot.clipping)
+        self.assertTrue(np.all(np.isfinite(out)))
+
     def test_sound_enhancer_can_be_disabled_without_changing_baseline_output(self) -> None:
         baseline = DownmixProcessor(preamp_db=0)
         processor = DownmixProcessor(preamp_db=0)

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from .constants import MAX_INPUT_CHANNELS, SAMPLE_RATE
+from .constants import MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMPLE_RATE
 from .devices import AudioDevice, check_format_support, list_devices
 
 
@@ -73,14 +73,14 @@ def format_checks(devices: list[AudioDevice]) -> list[FormatCheck]:
                 )
             )
         if dev.max_output_channels > 0:
-            ok, detail = check_format_support(dev.id, "output", MAX_INPUT_CHANNELS, SAMPLE_RATE)
+            ok, detail = check_format_support(dev.id, "output", OUTPUT_CHANNELS, SAMPLE_RATE)
             checks.append(
                 FormatCheck(
                     dev.id,
                     dev.name,
                     dev.hostapi,
                     "output",
-                    MAX_INPUT_CHANNELS,
+                    OUTPUT_CHANNELS,
                     SAMPLE_RATE,
                     ok,
                     detail,

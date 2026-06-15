@@ -54,6 +54,9 @@ class _NativeEngineSnapshot(ctypes.Structure):
         ("input_channels", ctypes.c_int32),
         ("callback_status_count", ctypes.c_int32),
         ("dsp_error_count", ctypes.c_int32),
+        ("callback_invocation_count", ctypes.c_uint64),
+        ("processed_frame_count", ctypes.c_uint64),
+        ("mmcss_registered", ctypes.c_int32),
         ("cpu_load", ctypes.c_float),
         ("input_latency", ctypes.c_float),
         ("output_latency", ctypes.c_float),
@@ -88,6 +91,9 @@ class NativeEngineRuntime:
     callback_status: str
     callback_status_count: int
     dsp_error_count: int
+    callback_invocation_count: int
+    processed_frame_count: int
+    mmcss_registered: bool
     cpu_load: float
     stream_latency: tuple[float, float] | None
     stream_profile: str
@@ -163,8 +169,15 @@ def _device_name(device: Any) -> str:
     return str(getattr(device, "name", "") or "")
 
 
-def _device_endpoint(device: Any) -> str:
-    return str(getattr(device, "native_endpoint_id", "") or "")
+def _device_endpoint(device: Any, mode: str) -> str:
+    endpoint_for = getattr(device, "native_endpoint_for", None)
+    if callable(endpoint_for):
+        return str(endpoint_for(mode) or "")
+    endpoint = getattr(device, "native_endpoint_id", "")
+    direction = getattr(device, "native_direction", "")
+    if endpoint and direction in ("", None, mode):
+        return str(endpoint)
+    return ""
 
 
 def _encode(value: str) -> bytes:
@@ -189,9 +202,9 @@ class NativeAudioBackend:
         if getattr(self, "_has_endpoint_start", False):
             ok = self._dll.downmix_native_start_endpoints(
                 self._handle,
-                _encode(_device_endpoint(input_device)),
+                _encode(_device_endpoint(input_device, "input")),
                 _encode(_device_name(input_device)),
-                _encode(_device_endpoint(output_device)),
+                _encode(_device_endpoint(output_device, "output")),
                 _encode(_device_name(output_device)),
                 profile.encode("ascii", errors="replace"),
                 int(block_size),
@@ -233,6 +246,9 @@ class NativeAudioBackend:
             callback_status=_decode(raw.callback_status),
             callback_status_count=int(raw.callback_status_count),
             dsp_error_count=int(raw.dsp_error_count),
+            callback_invocation_count=int(raw.callback_invocation_count),
+            processed_frame_count=int(raw.processed_frame_count),
+            mmcss_registered=bool(raw.mmcss_registered),
             cpu_load=float(raw.cpu_load),
             stream_latency=stream_latency,
             stream_profile=_decode(raw.stream_profile) or "ultra",

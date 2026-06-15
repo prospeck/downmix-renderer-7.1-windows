@@ -54,8 +54,10 @@ class Preset:
     lr_swap_enabled: bool = False
     global_peq_enabled: bool = False
     global_peq_text: str = ""
+    global_peq_visible: bool = True
     speaker_eq_enabled: bool = False
     speaker_eq_text: str = ""
+    speaker_eq_visible: bool = True
     trim_left_db: float = 0.0
     trim_right_db: float = 0.0
     user_created: bool = True
@@ -80,8 +82,10 @@ class Preset:
             lr_swap_enabled=bool(data.get("lr_swap_enabled", False)),
             global_peq_enabled=bool(data.get("global_peq_enabled", False)),
             global_peq_text=str(data.get("global_peq_text") or ""),
+            global_peq_visible=bool(data.get("global_peq_visible", True)),
             speaker_eq_enabled=bool(data.get("speaker_eq_enabled", False)),
             speaker_eq_text=str(data.get("speaker_eq_text") or ""),
+            speaker_eq_visible=bool(data.get("speaker_eq_visible", True)),
             trim_left_db=_normalize_trim_db(data.get("trim_left_db", 0.0)),
             trim_right_db=_normalize_trim_db(data.get("trim_right_db", 0.0)),
             user_created=bool(data.get("user_created", True)),
@@ -106,8 +110,10 @@ class Preset:
             "lr_swap_enabled": self.lr_swap_enabled,
             "global_peq_enabled": self.global_peq_enabled,
             "global_peq_text": self.global_peq_text,
+            "global_peq_visible": self.global_peq_visible,
             "speaker_eq_enabled": self.speaker_eq_enabled,
             "speaker_eq_text": self.speaker_eq_text,
+            "speaker_eq_visible": self.speaker_eq_visible,
             "trim_left_db": _normalize_trim_db(self.trim_left_db),
             "trim_right_db": _normalize_trim_db(self.trim_right_db),
             "user_created": self.user_created,
@@ -139,8 +145,10 @@ def preset_from_current(
     lr_swap_enabled: bool = False,
     global_peq_enabled: bool = False,
     global_peq_text: str = "",
+    global_peq_visible: bool = True,
     speaker_eq_enabled: bool = False,
     speaker_eq_text: str = "",
+    speaker_eq_visible: bool = True,
     trim_left_db: float = 0.0,
     trim_right_db: float = 0.0,
 ) -> Preset:
@@ -162,8 +170,10 @@ def preset_from_current(
         lr_swap_enabled=lr_swap_enabled,
         global_peq_enabled=global_peq_enabled,
         global_peq_text=global_peq_text,
+        global_peq_visible=global_peq_visible,
         speaker_eq_enabled=speaker_eq_enabled,
         speaker_eq_text=speaker_eq_text,
+        speaker_eq_visible=speaker_eq_visible,
         trim_left_db=_normalize_trim_db(trim_left_db),
         trim_right_db=_normalize_trim_db(trim_right_db),
     )
@@ -185,8 +195,10 @@ def update_preset_from_current(
     lr_swap_enabled: bool = False,
     global_peq_enabled: bool = False,
     global_peq_text: str = "",
+    global_peq_visible: bool = True,
     speaker_eq_enabled: bool = False,
     speaker_eq_text: str = "",
+    speaker_eq_visible: bool = True,
     trim_left_db: float = 0.0,
     trim_right_db: float = 0.0,
 ) -> None:
@@ -205,8 +217,10 @@ def update_preset_from_current(
     preset.lr_swap_enabled = lr_swap_enabled
     preset.global_peq_enabled = global_peq_enabled
     preset.global_peq_text = global_peq_text
+    preset.global_peq_visible = global_peq_visible
     preset.speaker_eq_enabled = speaker_eq_enabled
     preset.speaker_eq_text = speaker_eq_text
+    preset.speaker_eq_visible = speaker_eq_visible
     preset.trim_left_db = _normalize_trim_db(trim_left_db)
     preset.trim_right_db = _normalize_trim_db(trim_right_db)
 
@@ -229,8 +243,8 @@ def match_preset_for_output(
             continue
         if preset_output is None:
             continue
-        preset_endpoint = getattr(preset_output, "native_endpoint_id", None)
-        active_endpoint = getattr(active_output, "native_endpoint_id", None)
+        preset_endpoint = preset_output.native_endpoint_for("output")
+        active_endpoint = active_output.native_endpoint_for("output")
         if preset_endpoint and active_endpoint and preset_endpoint != active_endpoint:
             continue
         if preset_output.id == active_output.id:

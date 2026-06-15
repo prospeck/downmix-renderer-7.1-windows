@@ -94,8 +94,10 @@ class PresetTests(unittest.TestCase):
         self.assertFalse(loaded[0].lr_swap_enabled)
         self.assertFalse(loaded[0].global_peq_enabled)
         self.assertEqual(loaded[0].global_peq_text, "")
+        self.assertTrue(loaded[0].global_peq_visible)
         self.assertFalse(loaded[0].speaker_eq_enabled)
         self.assertEqual(loaded[0].speaker_eq_text, "")
+        self.assertTrue(loaded[0].speaker_eq_visible)
         self.assertEqual(loaded[0].trim_left_db, 0.0)
         self.assertEqual(loaded[0].trim_right_db, 0.0)
         self.assertEqual(loaded[0].sample_rate_mode, "auto")
@@ -119,6 +121,8 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(loaded[0].name, "Legacy")
         self.assertEqual(loaded[0].preamp_db, -4)
         self.assertFalse(loaded[0].global_peq_enabled)
+        self.assertTrue(loaded[0].global_peq_visible)
+        self.assertTrue(loaded[0].speaker_eq_visible)
         self.assertEqual(loaded[0].trim_left_db, 0.0)
         self.assertEqual(loaded[0].trim_right_db, 0.0)
 
@@ -188,8 +192,10 @@ class PresetTests(unittest.TestCase):
             lr_swap_enabled=True,
             global_peq_enabled=True,
             global_peq_text="Preamp: -3 dB",
+            global_peq_visible=False,
             speaker_eq_enabled=True,
             speaker_eq_text="CH:0\nPreamp: -6 dB",
+            speaker_eq_visible=False,
             trim_left_db=-2.5,
             trim_right_db=-6.0,
             sample_rate_mode="192000",
@@ -206,8 +212,10 @@ class PresetTests(unittest.TestCase):
         self.assertTrue(preset.lr_swap_enabled)
         self.assertTrue(preset.global_peq_enabled)
         self.assertEqual(preset.global_peq_text, "Preamp: -3 dB")
+        self.assertFalse(preset.global_peq_visible)
         self.assertTrue(preset.speaker_eq_enabled)
         self.assertEqual(preset.speaker_eq_text, "CH:0\nPreamp: -6 dB")
+        self.assertFalse(preset.speaker_eq_visible)
         self.assertEqual(preset.trim_left_db, -2.5)
         self.assertEqual(preset.trim_right_db, -6.0)
         self.assertEqual(preset.sample_rate_mode, "192000")

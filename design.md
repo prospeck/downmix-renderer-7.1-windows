@@ -1,6 +1,6 @@
 # Downmix Renderer Design System
 
-Last updated: 2026-06-14
+Last updated: 2026-06-15
 
 ## Design Intent
 
@@ -37,15 +37,16 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Primary commands use clear text: `Render`, `Raw Monitor`, `New`, `Update`, `Delete`; route refresh uses an icon-only button with a tooltip.
 - Icon-only controls are reserved for compact header actions such as renderer details and GitHub.
 - Toggles are used for binary audio/session options.
-- `Sound Enhancer` is a Gain / Monitor toggle because it is optional post-mix loudness processing, not a route or diagnostic action.
+- `Sound Enhancer` is a Gain / Monitor toggle because it is optional post-mix loudness processing, not a route or diagnostic action. Do not add speaker-recommendation helper text around it.
 - Numeric audio values use sliders or constrained line edits with clamping.
 - Route combo popups use the themed route view and show enough items to avoid cramped scroll affordances.
 - The header status says `Shared WASAPI | Ready` or `Shared WASAPI | ULTRA Mode` because the production backend uses WASAPI shared mode.
+- Renderer details are a compact, content-sized support dialog with one aligned label/detail grid and no bottom stretch or placeholder action buttons.
 
 ## Window Behavior
 
-- Main window: native Windows frame with dark-titlebar integration where supported. Keep native minimize, maximize, close, drag, focus, and taskbar behavior intact.
-- Raw Monitor: independent top-level non-modal window with its own title, minimize, and close controls. It is not parent-owned by the main renderer, so minimizing the renderer does not minimize Raw Monitor.
+- Main window: native Windows frame with dark-titlebar integration where supported. Keep native minimize, maximize, close, drag, focus, and taskbar behavior intact. The process AppUserModelID, embedded icon, and small/big window icons must be set before first-launch taskbar validation.
+- Raw Monitor: independent top-level non-modal window with its own title, minimize, and close controls. It is not parent-owned by the main renderer, so minimizing the renderer does not minimize Raw Monitor. It follows the active monitor layout and uses the same source-index mapping as Channel Field.
 - Application shutdown: the main renderer still closes Raw Monitor deliberately so the process exits cleanly.
 - Renderer details/help dialogs may stay parented to the main window because they are transient support surfaces.
 
@@ -54,10 +55,10 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Do not change matrix coefficients, LFE delay behavior, limiter behavior, PEQ math, channel trim semantics, or native/Python DSP parity unless fixing a verified audio bug.
 - Loudness enhancement must stay optional, post-mix, bounded by safety limiting, and mirrored between Python and native DSP.
 - UI polish must not add dependencies or move work onto the audio callback path.
-- Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows.
+- Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows. Automatic restart paths must respect the user stop state and the current Windows default output; direct speaker output pauses/releases the renderer instead of restarting it. After any stream start, callback/frame liveness must be proven quickly, with stale checks ignored by generation.
 
 ## Documentation And Testing Expectations
 
-- Docs must describe the current local testing artifact path: `testing\Downmixrenderer.exe`.
+- Docs must describe the current local production-test artifact path: `production testing\Downmixrenderer.exe`.
 - Tests should cover UI construction, layout regressions, Raw Monitor independence, route refresh behavior, startup shortcut validation, DSP invariants, PEQ parsing, settings safety, and native/Python parity where the DLL is available.
 - Any future behavior change should start with a regression test that fails for the old behavior and passes for the new behavior.

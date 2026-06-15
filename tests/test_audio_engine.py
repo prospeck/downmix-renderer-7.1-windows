@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from downmix_renderer.audio_engine import (
     LOW_LATENCY_BLOCK_SIZE,
     ULTRA_BLOCK_SIZE,
@@ -17,6 +19,7 @@ from downmix_renderer.audio_engine import (
 )
 from downmix_renderer.constants import MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMPLE_RATE
 from downmix_renderer.devices import AudioDevice
+from downmix_renderer.dsp import DspSnapshot
 from downmix_renderer.native_audio import NativeBackendUnavailable
 
 
@@ -200,6 +203,54 @@ class AudioEngineSettingsTests(unittest.TestCase):
 
         self.assertEqual(opened_blocks, [LOW_LATENCY_BLOCK_SIZE])
 
+    def test_python_callback_updates_liveness_counters(self) -> None:
+        class FakeProcessor:
+            def set_master_volume(self, scalar: float, muted: bool = False) -> None:
+                return None
+
+            def process(self, indata, outdata) -> None:
+                outdata.fill(0.0)
+
+            def snapshot(self) -> DspSnapshot:
+                zeros = np.zeros(MAX_INPUT_CHANNELS, dtype=np.float32)
+                return DspSnapshot(
+                    channel_levels=zeros,
+                    channel_rms=zeros,
+                    raw_channel_levels=zeros,
+                    raw_channel_rms=zeros,
+                    left_meter=0.0,
+                    right_meter=0.0,
+                    preamp_db=-14.0,
+                    trim_left_db=0.0,
+                    trim_right_db=0.0,
+                    limiter_gain=1.0,
+                    clipping=False,
+                    user_volume=1.0,
+                    master_volume=1.0,
+                    master_muted=False,
+                    surround_fill_enabled=False,
+                    surround_fill_active=False,
+                    upmix_9_1_6_enabled=False,
+                    upmix_9_1_6_active=False,
+                    channel_sanity_enabled=False,
+                    channel_sanity_active=False,
+                    sound_enhancer_enabled=False,
+                    sound_enhancer_gain=1.0,
+                )
+
+        engine = AudioEngine(processor=FakeProcessor(), backend="python")
+        indata = np.zeros((128, MAX_INPUT_CHANNELS), dtype=np.float32)
+        outdata = np.ones((128, OUTPUT_CHANNELS), dtype=np.float32)
+
+        engine._callback(indata, outdata, 128, None, None)
+        snapshot = engine.snapshot()
+        engine.close()
+
+        self.assertEqual(snapshot.callback_invocation_count, 1)
+        self.assertEqual(snapshot.processed_frame_count, 128)
+        self.assertFalse(snapshot.mmcss_registered)
+        self.assertTrue(np.all(outdata == 0.0))
+
     def test_native_backend_start_receives_full_device_descriptors(self) -> None:
         calls: list[tuple[AudioDevice, AudioDevice, str, int, int]] = []
 
@@ -329,6 +380,19 @@ class AudioEngineSettingsTests(unittest.TestCase):
         keep_awake._callback(buffer, 128, None, None)
 
         self.assertEqual(buffer.value, 0.0)
+
+    def test_keep_awake_records_start_error_without_raising(self) -> None:
+        keep_awake = OutputKeepAwake()
+
+        class FailingOutputStream:
+            def __init__(self, **kwargs) -> None:
+                raise RuntimeError("output unavailable")
+
+        with patch("downmix_renderer.audio_engine.sd.OutputStream", FailingOutputStream):
+            keep_awake.set_enabled(True, fake_device("output"), renderer_running=False)
+
+        self.assertFalse(keep_awake.active)
+        self.assertIn("output unavailable", keep_awake.last_error)
 
 
 if __name__ == "__main__":

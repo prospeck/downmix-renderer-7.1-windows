@@ -1,8 +1,8 @@
 # Downmix Renderer Technical Specification
 
-Last updated: 2026-06-14
+Last updated: 2026-06-15
 
-Current local test artifact: `testing\Downmixrenderer.exe`
+Current local production-test artifact: `production testing\Downmixrenderer.exe`
 
 Executable name: `Downmixrenderer.exe`
 
@@ -59,6 +59,8 @@ The packaged app loads `downmix_renderer\downmix_renderer_native.dll`, which wra
 - Uses the `ultra` profile by default with a 128-frame block request at 48 kHz.
 - Scales stream block requests at 96 kHz and 192 kHz to preserve the same approximate callback time budget as 48 kHz.
 - Uses RAW fallback profile with a 256-frame block request at 48 kHz if needed, also scaled by sample rate.
+- Registers the native callback thread with Windows MMCSS using the `Pro Audio` task category and critical AVRT priority when available.
+- Publishes callback-invocation and processed-frame counters so the UI can verify stream liveness after device switches.
 - Exposes a C ABI consumed by Python through `ctypes`.
 
 The UI labels the stream as "Shared WASAPI" to match the native miniaudio configuration (`ma_share_mode_shared`) with pro-audio hints for the ultra profile.
@@ -124,7 +126,7 @@ Each preset stores:
 - 9.1.6 upmix state.
 - L/R swap state.
 - User/global PEQ enabled state and text.
-- Speaker EQ enabled state and text.
+- L-R Correction enabled state and text.
 - Channel trim left/right dB.
 - Output matching keywords.
 
@@ -132,7 +134,13 @@ Presets are user-created; the app starts with no built-in presets. Manual preset
 
 ### 3.4 Smart Output Switching
 
-Smart preset switching polls device state every 1.5 seconds. Every third poll may force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes a refresh icon, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
+Smart preset switching polls device state every 500 ms. Native WASAPI endpoint default state is preferred over PortAudio's cached host API default when available, so Windows default-output flips are detected without waiting for stale PortAudio state to refresh. Every third poll may still force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes a refresh icon, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
+
+Default-output routing rule:
+
+- Windows default output is `CABLE Input` or another VB-CABLE playback endpoint: the renderer may start or recover the selected render route.
+- Windows default output is a normal speaker/DAC endpoint: the renderer stops capture/playback, disables keep-awake for that route, fully releases the stream, and preserves resume intent.
+- Automatic recovery/watchdog paths must satisfy both user intent (`_force_auto_start` or a currently running stream) and the current Windows default-output rule before calling `start_audio()`.
 
 Preset matching score:
 
@@ -196,12 +204,12 @@ If enough channels match front L/R too closely, duplicated non-front channels ar
 
 ### 3.9 L/R Swap
 
-L/R swap is applied after global PEQ and before speaker EQ/correction. Speaker correction mapping follows the active physical output mapping.
+L/R swap is applied after global PEQ and before L-R Correction. Correction mapping follows the active physical output mapping.
 
 When swap is enabled:
 
 - Stereo left and right samples are swapped.
-- Speaker EQ CH:0/CH:1 filter sets are mapped to the opposite physical side before runtime configuration is sent to the processor.
+- L-R Correction CH:0/CH:1 filter sets are mapped to the opposite physical side before runtime configuration is sent to the processor.
 
 ### 3.10 Channel Trim
 
@@ -215,17 +223,17 @@ TRIM_MAX_DB = 0.0
 Helper text shown in the UI:
 
 ```text
-Quick fine-tuning for output level L/R imbalance. If Speaker EQ or L/R Correction is enabled, do not use the channel trim setting.
+Quick fine-tuning for output level L/R imbalance. If L-R Correction is enabled, do not use the channel trim setting.
 ```
 
-Trim is applied after global PEQ, L/R swap, and speaker EQ/correction, and before the limiter.
+Trim is applied after global PEQ, L/R swap, and L-R Correction, and before the limiter.
 
-### 3.11 PEQ And Speaker Correction
+### 3.11 PEQ And L-R Correction
 
 The app has two PEQ stages:
 
 - User/global PEQ: applied to both stereo channels before L/R swap.
-- Speaker EQ / L-R Correction: applied per physical stereo side after L/R swap.
+- L-R Correction: applied per physical stereo side after L/R swap.
 
 Supported text syntax is Equalizer APO-like:
 
@@ -253,7 +261,7 @@ PEQ limits:
 
 ### 3.12 Raw Monitor And Route Probe
 
-Raw Monitor displays raw pre-processing channel peaks/RMS for all 16 capture channels. It is created as an independent top-level, non-modal window with its own title, minimize, and close controls, so minimizing the main renderer does not minimize the monitor. The main window still keeps a reference and closes the monitor during application shutdown.
+Raw Monitor displays the active monitor layout using the same channel-index mapping as Channel Field. In `windows_7_1` it shows `FL FR FC LFE BL BR SL SR` mapped to indices `0..7`; in `sharur_9_1_6` it shows all 16 labels including `TFL/TFR/TSL/TSR/TBL/TBR` mapped to indices `10..15`. It uses the current DSP monitor peaks/RMS so generated/upmixed channels light consistently with Channel Field. It is created as an independent top-level, non-modal window with its own title, minimize, and close controls, so minimizing the main renderer does not minimize the monitor. The main window still keeps a reference and closes the monitor during application shutdown.
 
 Route Probe can:
 
@@ -308,7 +316,7 @@ User/global PEQ
 L/R swap
     |
     v
-Speaker EQ / L-R correction
+L-R Correction
     |
     v
 Channel trim
@@ -578,12 +586,13 @@ right *= trim_right_gain
 
 Sound Enhancer is an optional post-mix loudness stage intended for quiet laptop speakers. It runs after matrix, preamp, PEQ, L/R swap, speaker correction, and channel trim, and before the final limiter. It does not change routing, matrix coefficients, PEQ math, trim semantics, LFE timing, or channel mapping.
 
-The stage uses fixed makeup gain plus a protected ceiling:
+The stage uses fixed makeup gain plus a protected ceiling. Peak detection for this stage uses a lightweight 4x Catmull-Rom inter-sample estimate, so the safety envelope reacts to obvious between-sample overshoots instead of only raw sample peaks:
 
 ```text
 makeup_gain = 10^(7.5 / 20)
 ceiling = 10^(-1.0 / 20)
-boosted_peak = peak * makeup_gain
+estimated_peak = max(sample_peak, 4x inter-sample estimate)
+boosted_peak = estimated_peak * makeup_gain
 ```
 
 If `boosted_peak` exceeds the ceiling, a fast safety gain is applied before the final limiter:
@@ -596,7 +605,7 @@ applied_safety_gain = min(smoothed_safety_gain, target_safety_gain)
 stereo *= makeup_gain * applied_safety_gain
 ```
 
-If a block still exceeds the ceiling due to numerical edge cases, the block is scaled down immediately to the same ceiling. This is a safety guard, not a tone-shaping clipper.
+If a block still exceeds the ceiling by the inter-sample estimate due to numerical edge cases, the block is scaled down immediately to the same ceiling. This is a safety guard, not a tone-shaping clipper.
 
 ### 5.11 Limiter
 
@@ -644,9 +653,9 @@ In the current UI flow, user volume is held at `1.0`; master volume follows the 
 
 Default preamp of `-14 dB` provides headroom before PEQ, trim, and limiter. The preamp is stored per preset and globally in settings.
 
-### 6.2 Speaker EQ / L-R Correction
+### 6.2 L-R Correction
 
-Speaker correction is intended for per-output calibration. The stage can load text files using UTF-8 with BOM, UTF-16, CP1252, or replacement fallback. Corrections are parsed into left/right cascades.
+L-R Correction is intended for per-output left/right balance calibration. The stage can load text files using UTF-8 with BOM, UTF-16, CP1252, or replacement fallback. Corrections are parsed into left/right cascades.
 
 When L/R swap is off:
 
@@ -664,7 +673,7 @@ CH:0 -> right output
 
 ### 6.3 Channel Trim Guidance
 
-Channel trim is a lightweight attenuation-only balance control. It should not be combined with Speaker EQ / L-R Correction for the same calibration problem because both affect final L/R balance.
+Channel trim is a lightweight attenuation-only balance control. It should not be combined with L-R Correction for the same calibration problem because both affect final L/R balance.
 
 ## 7. Dependencies And Frameworks
 
@@ -726,7 +735,7 @@ Native code dependencies:
 | `scripts/make_icon.py` | Build icon assets |
 | `tests/` | Unit tests for UI, DSP, native parity, PEQ, settings, presets, route probing, startup |
 | `assets/` | Production logo/icon assets used by UI and package |
-| `testing/` | Current local test package folder, ignored by git |
+| `production testing/` | Current local production-test package folder, ignored by git |
 
 ## 9. UI/UX Logic And Interaction Flow
 
@@ -753,9 +762,9 @@ The presets tab contains:
 - Output routing and PEQ panel.
 - L/R swap controls.
 - Channel trim controls.
-- Speaker EQ channel mapping helper.
+- L-R Correction channel mapping helper.
 - Global PEQ editor.
-- Speaker EQ / L-R Correction editor.
+- L-R Correction editor.
 
 PEQ text edits are debounced with a 260 ms timer before rebuilding runtime config.
 
@@ -800,7 +809,9 @@ Native callback errors:
 
 ### 10.3 Runtime Stream Recovery
 
-The native backend publishes miniaudio device notifications for stop, reroute, interruption, and unlock events into the snapshot callback status. The UI shell restarts the current route from the main thread when it sees device invalidation, reroute, interruption, failed/stopped running state, or sustained input activity with silent output after an idle period.
+The native backend publishes miniaudio device notifications for stop, reroute, interruption, and unlock events into the snapshot callback status. The UI shell handles recovery from the main thread. Before any automatic restart, it forces a fresh device/default-output check, confirms the user has not stopped rendering, and confirms Windows default output is VB-CABLE. If the default output is a direct speaker/DAC endpoint, recovery pauses and releases the stream instead of restarting it.
+
+After every start or device-switch recovery, the UI schedules a short liveness check. If callback or frame counters do not advance within `AUDIO_LIVENESS_TIMEOUT_MS`, the app treats the start as silent/faulted, fully tears the stream down, re-enumerates devices, and rebuilds once through the same direction-neutral start path. Stale liveness checks are ignored through a start-generation guard.
 
 Recovery is rate-limited by `RECOVERY_COOLDOWN_SECONDS` and ignores intentional silence when the Windows endpoint volume is muted or effectively zero.
 
@@ -923,10 +934,10 @@ The default PyInstaller output folder is:
 Finalised Version
 ```
 
-The current local testing build is generated with:
+The current production-test build is generated with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "testing"
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "production testing"
 ```
 
 The EXE name remains:
@@ -935,11 +946,18 @@ The EXE name remains:
 Downmixrenderer.exe
 ```
 
+Taskbar identity requirements:
+
+- `renderer_app.spec` embeds `assets\downmix_renderer_logo.ico` into `Downmixrenderer.exe`.
+- The icon must contain at least 16, 32, 48, and 256 px frames.
+- Startup calls `SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)` before creating `QApplication`.
+- The main window sends `WM_SETICON` for both `ICON_SMALL` and `ICON_BIG` from the local `.ico` asset, so fresh Windows profiles do not depend on a manual pin to associate the icon.
+
 ### 12.4 Manual End-To-End Validation Checklist
 
 Recommended validation pass:
 
-1. Launch `testing\Downmixrenderer.exe`.
+1. Launch `production testing\Downmixrenderer.exe`.
 2. Confirm the app opens without framework/runtime errors.
 3. Confirm the route bar shows `CABLE Input` for the VB-CABLE capture endpoint.
 4. Confirm output selector shows available WASAPI stereo outputs.
@@ -949,18 +967,23 @@ Recommended validation pass:
 8. Toggle 7.1 surround fill and verify diagnostics report armed/active state.
 9. Toggle 9.1.6 upmix and verify diagnostics report armed/active state.
 10. Load or paste User/global PEQ and confirm status/warning labels.
-11. Load or paste Speaker EQ / L-R correction and confirm left/right filter counts.
-12. Toggle L/R swap and confirm speaker mapping helper behavior.
+11. Load or paste L-R Correction and confirm left/right filter counts.
+12. Toggle L/R swap and confirm correction mapping helper behavior.
 13. Apply channel trim values inside `-24..0 dB` and confirm they persist.
 14. Create, update, select, and delete a preset.
 15. Confirm smart switching selects matching presets when Windows default output changes.
-16. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
-17. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled.
-18. Open Raw Monitor, minimize the main window, and confirm Raw Monitor remains visible.
-19. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
-20. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render.
-21. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
-22. Relaunch app and confirm settings/presets restore.
+16. Switch Windows default output from VB-CABLE to normal speakers while rendering; confirm audio routes directly within about 1 second and the renderer status becomes paused, with no Apple Music restart.
+17. Switch Windows default output from normal speakers back to VB-CABLE; confirm the renderer resumes without app restart.
+18. With renderer stopped and Windows default output on normal speakers, leave the app open for 15 minutes and confirm no capture/render restart attempts.
+19. Rapidly switch Windows default output 10+ times and confirm there are no crashes, stale handles, or audible artifacts.
+20. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
+21. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled only while Windows default output is VB-CABLE.
+22. Open Raw Monitor in both `7.1 Monitor` and `9.1.6 Monitor`; confirm every label lights against the same Channel Field source, including `SL/SR` and height channels.
+23. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
+24. Launch on a clean Windows profile and confirm the taskbar icon is correct immediately before pinning.
+25. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render when default output is VB-CABLE.
+26. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
+27. Relaunch app and confirm settings/presets restore.
 
 ## 13. Known Limitations
 
@@ -995,8 +1018,8 @@ The application is considered production-ready when:
 
 - Unit tests pass.
 - Native DLL builds successfully.
-- PyInstaller creates `testing\Downmixrenderer.exe` for this release.
-- The EXE launches and stays running from `testing\Downmixrenderer.exe`.
+- PyInstaller creates `production testing\Downmixrenderer.exe` for this release.
+- The EXE launches and stays running from `production testing\Downmixrenderer.exe`.
 - The UI restores settings without crashing.
 - Audio stream starts on a valid 16-channel WASAPI input and stereo WASAPI output.
 - DSP snapshot values update under signal.

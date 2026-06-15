@@ -117,6 +117,33 @@ class NativeDspTrimTests(unittest.TestCase):
         self.assertTrue(native.snapshot().sound_enhancer_enabled)
         self.assertLessEqual(float(np.max(np.abs(native.process(data)))), 0.8914 + 1e-6)
 
+    def test_native_sound_enhancer_matches_python_true_peak_guard(self) -> None:
+        backend = self.make_backend()
+        self.assertTrue(getattr(backend, "_has_sound_enhancer", False))
+        native = backend.processor
+        python = DownmixProcessor(preamp_db=0)
+
+        native.set_preamp_db(0)
+        native.set_sound_enhancer_enabled(True)
+        python.set_sound_enhancer_enabled(True)
+
+        frames = DRY_DELAY_SAMPLES + 96
+        pattern = np.array([0.86956584, -0.8674835, -0.8719893, 0.7874929], dtype=np.float32)
+        repeated = np.resize(pattern, frames)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 0] = repeated
+        data[:, 1] = -repeated
+
+        native_out = native.process(data)
+        python_out = python.process(data)
+
+        np.testing.assert_allclose(native_out, python_out, rtol=0, atol=4e-5)
+        self.assertLessEqual(
+            python._estimate_true_peak_stereo(native_out, native_out.shape[0]),
+            0.8914 + 1e-6,
+        )
+        self.assertTrue(native.snapshot().clipping)
+
     def test_native_sample_rate_matches_python_reference(self) -> None:
         backend = self.make_backend()
         if not getattr(backend, "_has_sample_rate", False):

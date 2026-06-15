@@ -6,6 +6,8 @@ from pathlib import Path
 
 APP_STARTUP_FILE = "Downmix Renderer.lnk"
 LEGACY_STARTUP_FILES = ("DownmixRenderer.cmd", "TaranDownmixRendererSuite.cmd")
+PRODUCTION_DIST_NAME = "production testing"
+PACKAGE_EXECUTABLE_NAME = "Downmixrenderer.exe"
 
 
 def _startup_dir() -> Path | None:
@@ -65,9 +67,15 @@ def _startup_entry_valid(path: Path, app_root: Path | None = None) -> bool:
         return False
     target = _shortcut_target(path)
     if target is None:
-        return True
+        return False
     if not target.exists():
         return False
+    expected_target = _preferred_packaged_target(app_root)
+    if expected_target is not None:
+        try:
+            return target.resolve() == expected_target.resolve()
+        except Exception:
+            return False
     if getattr(sys, "frozen", False):
         try:
             return target.resolve() == Path(sys.executable).resolve()
@@ -80,6 +88,15 @@ def _startup_entry_valid(path: Path, app_root: Path | None = None) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _preferred_packaged_target(app_root: Path | None) -> Path | None:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable)
+    if app_root is None:
+        return None
+    packaged = Path(app_root) / PRODUCTION_DIST_NAME / PACKAGE_EXECUTABLE_NAME
+    return packaged if packaged.exists() else None
 
 
 def _shortcut_target(path: Path) -> Path | None:
@@ -96,8 +113,8 @@ def _shortcut_target(path: Path) -> Path | None:
 
 
 def _shortcut_config(app_root: Path) -> tuple[Path, str, Path, Path]:
-    if getattr(sys, "frozen", False):
-        executable = Path(sys.executable)
+    executable = _preferred_packaged_target(app_root)
+    if executable is not None:
         return executable, "", executable.parent, executable
 
     pythonw = Path(sys.executable).with_name("pythonw.exe")

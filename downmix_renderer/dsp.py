@@ -55,6 +55,7 @@ SOUND_ENHANCER_MAKEUP_GAIN = 10 ** (SOUND_ENHANCER_MAKEUP_DB / 20.0)
 SOUND_ENHANCER_CEILING = 10 ** (SOUND_ENHANCER_CEILING_DB / 20.0)
 SOUND_ENHANCER_ATTACK_ALPHA = 0.85
 SOUND_ENHANCER_RELEASE_ALPHA = 0.08
+SOUND_ENHANCER_TRUE_PEAK_FRACTIONS = (0.25, 0.5, 0.75)
 
 
 def db_to_linear(db_value: float) -> float:
@@ -605,7 +606,7 @@ class DownmixProcessor:
             self._sound_enhancer_applied_gain = 1.0
             return 1.0, False
 
-        peak = self._peak_stereo(self._stereo[:frames], frames)
+        peak = self._estimate_true_peak_stereo(self._stereo[:frames], frames)
         target_safety_gain = 1.0
         limited = False
         if peak > 1e-12:
@@ -628,7 +629,7 @@ class DownmixProcessor:
         applied_gain = SOUND_ENHANCER_MAKEUP_GAIN * applied_safety_gain
         self._stereo[:frames] *= applied_gain
 
-        post_peak = self._peak_stereo(self._stereo[:frames], frames)
+        post_peak = self._estimate_true_peak_stereo(self._stereo[:frames], frames)
         if post_peak > SOUND_ENHANCER_CEILING:
             emergency_gain = SOUND_ENHANCER_CEILING / post_peak
             self._stereo[:frames] *= emergency_gain
@@ -637,6 +638,48 @@ class DownmixProcessor:
 
         self._sound_enhancer_applied_gain = applied_gain
         return applied_gain, limited
+
+    def _estimate_true_peak_stereo(self, samples: np.ndarray, frames: int) -> float:
+        """Estimate inter-sample stereo peaks without heap work in the callback path.
+
+        This is a lightweight 4x Catmull-Rom guard for the optional Sound
+        Enhancer. It is intentionally conservative compared with raw sample
+        peak limiting, but it avoids changing the downmix matrix, routing, PEQ,
+        or trim stages.
+        """
+        if frames <= 0:
+            return 0.0
+        sample_peak = self._peak_stereo(samples, frames)
+        if frames < 2:
+            return sample_peak
+
+        peak = sample_peak
+        sample_count = min(frames, samples.shape[0])
+        channels = min(OUTPUT_CHANNELS, samples.shape[1])
+        for channel in range(channels):
+            for index in range(sample_count - 1):
+                p0 = float(samples[index - 1 if index > 0 else index, channel])
+                p1 = float(samples[index, channel])
+                p2 = float(samples[index + 1, channel])
+                p3_index = index + 2 if index + 2 < sample_count else index + 1
+                p3 = float(samples[p3_index, channel])
+                for frac in SOUND_ENHANCER_TRUE_PEAK_FRACTIONS:
+                    value = self._catmull_rom_sample(p0, p1, p2, p3, frac)
+                    abs_value = abs(value)
+                    if abs_value > peak:
+                        peak = abs_value
+        return float(peak)
+
+    @staticmethod
+    def _catmull_rom_sample(p0: float, p1: float, p2: float, p3: float, frac: float) -> float:
+        frac2 = frac * frac
+        frac3 = frac2 * frac
+        return 0.5 * (
+            (2.0 * p1)
+            + ((-p0 + p2) * frac)
+            + ((2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * frac2)
+            + ((-p0 + 3.0 * p1 - 3.0 * p2 + p3) * frac3)
+        )
 
     def _mix_to_stereo(self, processed16: np.ndarray, frames: int, matrix: np.ndarray) -> None:
         stereo = self._stereo[:frames]
