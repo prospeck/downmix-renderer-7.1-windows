@@ -53,6 +53,8 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertNotIn('"-w"', source)
         self.assertIn('"-Wall"', source)
         self.assertIn('"-Wextra"', source)
+        self.assertIn("DLL.with_suffix", source)
+        self.assertIn("PDB.unlink", source)
 
     def test_release_signing_script_signs_and_verifies_pe_files(self) -> None:
         source = (ROOT / "scripts" / "sign_release.ps1").read_text(encoding="utf-8")
@@ -70,7 +72,17 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn('--distpath "."', source)
         self.assertIn("--workpath build", source)
         self.assertIn("-Path $DistName", source)
+        self.assertIn("Get-CimInstance Win32_Process", source)
+        self.assertIn("Stop-Process -Id $_.ProcessId -Force", source)
+        self.assertIn('Join-Path $root "build"', source)
+        self.assertIn("Remove-Item -LiteralPath $buildDir -Recurse -Force", source)
         self.assertNotIn('Join-Path "dist" $DistName', source)
+
+    def test_release_package_disables_upx_for_windows_compatibility(self) -> None:
+        source = (ROOT / "renderer_app.spec").read_text(encoding="utf-8")
+
+        self.assertNotIn("upx=True", source)
+        self.assertGreaterEqual(source.count("upx=False"), 2)
 
     def test_icon_contains_standard_windows_taskbar_sizes(self) -> None:
         icon_path = ROOT / "assets" / "downmix_renderer_logo.ico"

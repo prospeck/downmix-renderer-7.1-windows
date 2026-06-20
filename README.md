@@ -12,11 +12,14 @@ Premium Windows WASAPI downmix renderer for routing a multichannel VB-CABLE capt
 - Saved preamp, route, layout, PEQ, correction, and trim state per profile.
 - User-created preset buttons with create, update, delete, and one-click switching.
 - Runtime smart preset switching when the active Windows output device changes.
-- Instant A/B default-output switching: VB-CABLE engages the renderer, direct speakers pause and release the render path.
+- Instant A/B default-output switching: VB-CABLE engages the renderer, direct speakers either receive the live bridge or pause/release the render path depending on whether VB-CABLE is still actively fed.
+- Lossless-safe output switching: when Apple Music keeps feeding VB-CABLE after a Windows output change, the renderer retargets its bridge to the new physical output without pausing Apple Music or waiting for a track change.
+- Endpoint-aware Windows default-output tracking so reused/stale PortAudio ids do not block smart switching after a real device change.
 - Manual route refresh icon for immediate WASAPI re-enumeration without restarting.
 - Optional Sound Enhancer for laptop speakers, adding protected post-mix loudness without changing downmix routing.
 - ULTRA Mode as the default aggressive shared-WASAPI path, with RAW Mode as the alternate low-latency route.
-- Optional system boot autostart via a Startup-folder launcher that validates the current executable path.
+- Optional system boot autostart via a Startup-folder launcher that validates the current executable path and removes old Downmix launchers.
+- High-DPI Qt startup configuration for consistent Windows scaling and icon rendering across laptops and monitors.
 - Self-healing stream recovery for device invalidation, interruption, and idle-resume silence.
 - Post-switch liveness checks that rebuild the stream if callbacks do not resume after a default-device change.
 - Native callback-thread MMCSS registration for cleaner playback under GPU/DPC scheduling pressure.
@@ -61,19 +64,21 @@ Each preset saves device identities, preamp, channel layout, Sound Enhancer, PEQ
 
 ## Smart Switching
 
-`Smart preset switching` matches the current Windows WASAPI default output to a saved preset. If you manually click another preset, the app respects that manual choice until Windows reports a different default output device.
+`Smart preset switching` matches the current Windows WASAPI default output to a saved preset. If you manually click another preset, the app respects that manual choice until Windows reports a different default output identity. The identity includes the native endpoint when available, not just PortAudio's numeric device id, so reused or stale ids do not pin the app to an old route.
 
-When Windows default output is `CABLE Input`, the renderer may run or recover the selected route. When Windows default output changes to normal speakers or another direct endpoint, the app stops and releases the capture/render path, disables keep-awake for that route, and preserves resume intent so switching back to VB-CABLE resumes without restarting the app.
+When Windows default output is `CABLE Input`, the renderer may run or recover the selected route. When Windows default output changes to normal speakers or another direct endpoint, the app enters a short direct-output handoff window. If Apple Music reroutes cleanly and VB-CABLE goes silent, the renderer pauses/releases capture and preserves resume intent. If Lossless playback continues feeding VB-CABLE, the renderer retargets its output bridge to the newly selected physical endpoint after a short grace period, so the current track follows the Windows output change without requiring an Apple Music pause/play or track change.
 
-`Auto-start on Boot` writes a Windows Startup-folder shortcut. It does not require admin rights. On launch, the app ignores stale shortcuts that point to missing or relocated executables, then recreates the shortcut when you enable boot autostart again.
+`Auto-start on Boot` writes a Windows Startup-folder shortcut. It does not require admin rights. When enabled or disabled, the app removes related old Downmix Renderer `.lnk`, `.cmd`, `.bat`, and `.ps1` Startup entries by explicit name, target, or script-content checks, while leaving unrelated Startup items alone.
 
 ## Device Refresh And Recovery
 
-Use the refresh icon in the route bar after connecting or waking an output device. The app re-enumerates WASAPI devices immediately, preserves the selected route when possible, and restarts the renderer only when the active route materially changes and Windows default output is still VB-CABLE.
+Use the refresh icon in the route bar after connecting or waking an output device. The app re-enumerates WASAPI devices immediately, preserves the selected route when possible, refreshes the endpoint-aware default-output identity, and restarts the renderer only when the active route materially changes and Windows default output is still VB-CABLE.
 
-The native backend reports WASAPI stop, reroute, and interruption notifications to the UI shell. If playback resumes after an idle period but the renderer sees input activity with sustained silent output, the current route is restarted automatically only when the user has not stopped rendering and the current Windows default output is VB-CABLE.
+The native backend reports WASAPI stop, reroute, and interruption notifications to the UI shell. Fresh notifications are handled immediately; stale notification text is consumed once and ignored so rapid switching does not loop. If playback resumes after an idle period but the renderer sees input activity with sustained silent output, the current route is restarted automatically only when the user has not stopped rendering and the current Windows default output is VB-CABLE.
 
 After each start or default-device recovery, the app verifies that callback/frame counters are advancing. If the stream reports running but no buffers flow within a short timeout, it fully releases and rebuilds the route once from a fresh device enumeration.
+
+This switching behavior is intentionally conservative. It follows Windows Core Audio stream-routing guidance: route changes are asynchronous, old streams must be rebound quickly, and application state should be preserved. Future work must not replace this with media-player play/pause automation, unconditional restarts, or parallel device-enumeration paths.
 
 ## Channel Layouts
 

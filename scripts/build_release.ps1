@@ -8,6 +8,11 @@ $root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 
 Push-Location $root
 try {
+    $targetExe = Join-Path $root (Join-Path $DistName "Downmixrenderer.exe")
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -eq $targetExe } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
     python scripts/build_native_backend.py
     if ($LASTEXITCODE -ne 0) {
         throw "Native backend build failed."
@@ -24,6 +29,11 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Release signing failed."
         }
+    }
+
+    $buildDir = Join-Path $root "build"
+    if (Test-Path -LiteralPath $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
     }
 } finally {
     Pop-Location

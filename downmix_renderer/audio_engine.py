@@ -214,6 +214,8 @@ class AudioEngine:
         if output_device.max_output_channels < OUTPUT_CHANNELS:
             raise RuntimeError("Output must expose at least 2 channels")
 
+        self._refresh_volume_state(force=True)
+
         requested_profile = _normalize_stream_profile(stream_profile)
         requested_sample_rate_mode = _normalize_sample_rate_mode(sample_rate_mode)
         sample_rate = _resolve_sample_rate(requested_sample_rate_mode, input_device, output_device)
@@ -319,12 +321,17 @@ class AudioEngine:
         self.keep_awake.update_output_device(active_output, running, active_sample_rate)
 
     def poll_volume(self) -> VolumeState:
+        return self._refresh_volume_state(force=False)
+
+    def _refresh_volume_state(self, force: bool = False) -> VolumeState:
         now = monotonic()
-        if now - self._last_volume_poll < self._volume_poll_interval:
+        if not force and now - self._last_volume_poll < self._volume_poll_interval:
             return self._volume_state
         self._last_volume_poll = now
         self._volume_state = self.volume_follower.get_state()
-        self.processor.set_master_volume(self._volume_state.scalar, self._volume_state.muted)
+        setter = getattr(self.processor, "set_master_volume", None)
+        if callable(setter):
+            setter(self._volume_state.scalar, self._volume_state.muted)
         return self._volume_state
 
     def snapshot(self) -> EngineSnapshot:

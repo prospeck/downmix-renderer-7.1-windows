@@ -81,6 +81,10 @@ RECOVERY_INPUT_ACTIVITY_THRESHOLD = 0.003
 RECOVERY_OUTPUT_SILENCE_THRESHOLD = 0.0005
 AUDIO_LIVENESS_TIMEOUT_MS = 360
 AUDIO_LIVENESS_REBUILD_LIMIT = 1
+DIRECT_OUTPUT_RESUME_SETTLE_MS = 120
+DIRECT_OUTPUT_HANDOFF_SILENCE_SECONDS = 0.45
+DIRECT_OUTPUT_HANDOFF_INPUT_ACTIVITY_THRESHOLD = 0.0007
+DIRECT_OUTPUT_HANDOFF_BRIDGE_RETARGET_SECONDS = 0.12
 GITHUB_URL = "https://github.com/prospeck/downmix-renderer-7.1-windows.git"
 APP_USER_MODEL_ID = "Taran.DownmixRenderer.DownmixRenderer"
 WM_SETICON = 0x0080
@@ -747,39 +751,46 @@ def value_label(text: str = "--") -> QtWidgets.QLabel:
 def _draw_refresh_glyph(
     painter: QtGui.QPainter,
     center: QtCore.QPointF,
-    radius: float,
+    em_size: float,
     color: QtGui.QColor,
     stroke_width: float,
     rotation_degrees: float = 0.0,
-    wheel_morph: float = 0.0,
+    opacity: float = 1.0,
 ) -> None:
-    wheel_morph = max(0.0, min(1.0, float(wheel_morph)))
+    opacity = max(0.0, min(1.0, float(opacity)))
     painter.save()
     painter.translate(center)
-    if rotation_degrees:
-        painter.rotate(rotation_degrees)
-    pen = QtGui.QPen(color, stroke_width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(QtCore.Qt.NoBrush)
-    if wheel_morph >= 0.985:
-        painter.drawEllipse(QtCore.QRectF(-radius, -radius, radius * 2.0, radius * 2.0))
-    else:
-        sweep = RouteRefreshButton.refresh_icon_arc_sweep_degrees + (
-            (354.0 - RouteRefreshButton.refresh_icon_arc_sweep_degrees) * wheel_morph
-        )
-        painter.drawArc(QtCore.QRectF(-radius, -radius, radius * 2.0, radius * 2.0), 32 * 16, int(sweep * 16))
 
-    arrow_alpha = int(color.alpha() * max(0.0, 1.0 - (wheel_morph * 1.35)))
-    if arrow_alpha > 8:
-        arrow_color = QtGui.QColor(color)
-        arrow_color.setAlpha(arrow_alpha)
-        painter.setPen(QtGui.QPen(arrow_color, stroke_width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
-        painter.setBrush(QtCore.Qt.NoBrush)
-        tip = QtCore.QPointF(radius * 0.98, radius * -0.58)
-        trailing_wing = QtCore.QPointF(radius * 0.34, radius * -0.56)
-        upper_wing = QtCore.QPointF(radius * 0.69, radius * -1.10)
-        painter.drawLine(tip, trailing_wing)
-        painter.drawLine(tip, upper_wing)
+    spoke_count = RouteRefreshButton.refresh_spinner_spoke_count
+    source_alpha = max(0.0, min(1.0, color.alphaF()))
+    cycle_progress = (float(rotation_degrees) / 360.0) % 1.0
+
+    painter.setPen(QtCore.Qt.NoPen)
+    for index in range(spoke_count):
+        phase = (cycle_progress - (index * RouteRefreshButton.refresh_spinner_blade_delay)) % 1.0
+        alpha = max(0.0, 1.0 - phase) * source_alpha * opacity
+        if alpha <= 0.001:
+            continue
+        spoke_color = QtGui.QColor(
+            color.red(),
+            color.green(),
+            color.blue(),
+            int(255 * alpha),
+        )
+        painter.save()
+        painter.rotate(index * RouteRefreshButton.refresh_spinner_blade_degrees)
+        painter.setBrush(spoke_color)
+        painter.drawRoundedRect(
+            QtCore.QRectF(
+                (RouteRefreshButton.refresh_spinner_blade_left_em - 0.5) * em_size,
+                (1.0 - RouteRefreshButton.refresh_spinner_blade_height_em) * em_size - (0.5 * em_size),
+                RouteRefreshButton.refresh_spinner_blade_width_em * em_size,
+                RouteRefreshButton.refresh_spinner_blade_height_em * em_size,
+            ),
+            RouteRefreshButton.refresh_spinner_blade_radius_em * em_size,
+            RouteRefreshButton.refresh_spinner_blade_radius_em * em_size,
+        )
+        painter.restore()
     painter.restore()
 
 
@@ -791,39 +802,46 @@ def refresh_icon(size: int = 22) -> QtGui.QIcon:
     _draw_refresh_glyph(
         painter,
         QtCore.QPointF(size / 2.0, size / 2.0),
-        size * 0.305,
-        QtGui.QColor("#f7fbfa"),
-        2.3,
+        min(float(size), RouteRefreshButton.refresh_spinner_static_em_px),
+        QtGui.QColor(RouteRefreshButton.refresh_spinner_base_color),
+        1.0,
     )
     painter.end()
     return QtGui.QIcon(pixmap)
 
 
 class RouteRefreshButton(QtWidgets.QPushButton):
-    SPINNER_MINIMUM_VISIBLE_MS = 520
-    SPINNER_SETTLE_FADE_MS = 150
+    SPINNER_MINIMUM_VISIBLE_MS = 720
+    SPINNER_SETTLE_FADE_MS = 0
     REFRESH_ANIMATION_MS = SPINNER_MINIMUM_VISIBLE_MS
     has_premium_refresh_animation = True
-    refresh_icon_stroke_width = 2.3
-    refresh_icon_gap_degrees = 100
-    refresh_icon_arrow_size = 6.2
-    refresh_arrow_direction = "clockwise_upper_right"
-    refresh_arrow_head_style = "line_chevron"
-    refresh_arrow_tip_angle_degrees = 34
-    refresh_arrow_tip_y_ratio = -0.58
-    refresh_icon_radius = 6.85
-    refresh_icon_arc_sweep_degrees = 282.0
+    refresh_icon_style = "css_spinner_fade9234"
+    refresh_icon_stroke_width = 0.0
+    refresh_icon_radius = 0.0
     refresh_spin_degrees = 360
     uses_refresh_pulse = False
     uses_refresh_animation_group = True
     refresh_press_feedback_enabled = True
     uses_refresh_wheel_morph = True
-    refresh_wheel_morph_peak = 0.5
-    refresh_wheel_hold_start = 0.34
-    refresh_wheel_hold_end = 0.66
-    refresh_wheel_accent_color = "#45d88f"
-    refresh_wheel_tint_follows_morph = True
-    refresh_easing_curve_name = "OutCubic"
+    uses_chatgpt_style_spinner = False
+    uses_css_spinner_fade9234 = True
+    refresh_wheel_morph_peak = 1.0
+    refresh_wheel_hold_start = 0.0
+    refresh_wheel_hold_end = 1.0
+    refresh_wheel_accent_color = "#d8dcde"
+    refresh_wheel_tint_follows_morph = False
+    refresh_easing_curve_name = "Linear"
+    refresh_spinner_base_color = "#d8dcde"
+    refresh_spinner_spoke_count = 12
+    refresh_spinner_blade_degrees = 30
+    refresh_spinner_blade_delay = 0.083
+    refresh_spinner_em_px = 20.0
+    refresh_spinner_static_em_px = 16.0
+    refresh_spinner_blade_left_em = 0.4629
+    refresh_spinner_blade_width_em = 0.074
+    refresh_spinner_blade_height_em = 0.2777
+    refresh_spinner_blade_radius_em = 0.0555
+    refresh_spinner_transform_origin_y_em = -0.2222
 
     def __init__(self) -> None:
         super().__init__()
@@ -841,9 +859,9 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         self._refresh_animation_group = QtCore.QParallelAnimationGroup(self)
         self._refresh_animation = QtCore.QPropertyAnimation(self, b"refreshProgress", self._refresh_animation_group)
         self._refresh_animation.setDuration(self.REFRESH_ANIMATION_MS)
-        self._refresh_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._refresh_animation.setEasingCurve(QtCore.QEasingCurve.Linear)
         self._refresh_press_animation = QtCore.QPropertyAnimation(self, b"refreshPressDepth", self._refresh_animation_group)
-        self._refresh_press_animation.setDuration(118)
+        self._refresh_press_animation.setDuration(88)
         self._refresh_press_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._refresh_animation_group.addAnimation(self._refresh_animation)
         self._refresh_animation_group.addAnimation(self._refresh_press_animation)
@@ -878,17 +896,7 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         return max(0.0, 1.0 - (t * t * (3.0 - (2.0 * t))))
 
     def refresh_glyph_color(self) -> QtGui.QColor:
-        base = QtGui.QColor("#ffffff" if self.underMouse() or self.hasFocus() or self.isDown() else "#f0f4f3")
-        accent = QtGui.QColor(self.refresh_wheel_accent_color)
-        t = self.refresh_wheel_morph
-        if t <= 0.0:
-            return base
-        return QtGui.QColor(
-            int(base.red() + ((accent.red() - base.red()) * t)),
-            int(base.green() + ((accent.green() - base.green()) * t)),
-            int(base.blue() + ((accent.blue() - base.blue()) * t)),
-            255,
-        )
+        return QtGui.QColor(self.refresh_spinner_base_color)
 
     @property
     def refresh_press_depth(self) -> float:
@@ -925,7 +933,8 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         self._refresh_animation.setStartValue(self._refresh_progress)
         self._refresh_animation.setEndValue(1.0)
         self._refresh_press_animation.setStartValue(0.0)
-        self._refresh_press_animation.setKeyValueAt(0.42, 1.0)
+        self._refresh_press_animation.setKeyValueAt(0.22, 1.0)
+        self._refresh_press_animation.setKeyValueAt(0.58, 0.42)
         self._refresh_press_animation.setEndValue(0.0)
         self._refresh_animation_group.start()
         self._refresh_animation_group.setCurrentTime(1)
@@ -941,11 +950,8 @@ class RouteRefreshButton(QtWidgets.QPushButton):
 
     def _finish_refresh_animation(self) -> None:
         self._set_refresh_press_depth(0.0)
-        self._set_refresh_progress(self.refresh_wheel_hold_end)
-        self._set_refresh_settle_alpha(1.0)
-        self._refresh_settle_animation.setStartValue(1.0)
-        self._refresh_settle_animation.setEndValue(0.0)
-        self._refresh_settle_animation.start()
+        self._set_refresh_progress(0.0)
+        self._set_refresh_settle_alpha(0.0)
 
     def _reset_after_refresh_settle(self) -> None:
         self._set_refresh_progress(0.0)
@@ -969,16 +975,16 @@ class RouteRefreshButton(QtWidgets.QPushButton):
         painter.drawRoundedRect(rect, 10, 10)
 
         press = math.sin(math.pi * self._refresh_press_depth)
-        center = rect.center() + QtCore.QPointF(0.0, 0.45 * press)
+        center = rect.center() + QtCore.QPointF(0.0, 0.35 * press)
         painter.save()
         if press > 0.0:
             painter.translate(rect.center())
-            scale = 1.0 - (0.035 * press)
+            scale = 1.0 - (0.045 * press)
             painter.scale(scale, scale)
             painter.translate(-rect.center())
         settle = self._refresh_settle_alpha
         if settle > 0.001:
-            base_color = QtGui.QColor("#ffffff" if self.underMouse() or self.hasFocus() or self.isDown() else "#f0f4f3")
+            base_color = QtGui.QColor(self.refresh_spinner_base_color)
             base_color.setAlpha(int(255 * (1.0 - settle)))
             wheel_color = QtGui.QColor(self.refresh_wheel_accent_color)
             wheel_color.setAlpha(int(255 * settle))
@@ -986,7 +992,7 @@ class RouteRefreshButton(QtWidgets.QPushButton):
                 _draw_refresh_glyph(
                     painter,
                     center,
-                    self.refresh_icon_radius,
+                    self.refresh_spinner_em_px,
                     base_color,
                     self.refresh_icon_stroke_width,
                     0.0,
@@ -996,21 +1002,21 @@ class RouteRefreshButton(QtWidgets.QPushButton):
                 _draw_refresh_glyph(
                     painter,
                     center,
-                    self.refresh_icon_radius,
+                    self.refresh_spinner_em_px,
                     wheel_color,
                     self.refresh_icon_stroke_width,
-                    -self.refresh_spin_degrees * self.refresh_wheel_hold_end,
+                    self.refresh_spin_degrees * self.refresh_wheel_hold_end,
                     1.0,
                 )
         else:
             _draw_refresh_glyph(
                 painter,
                 center,
-                self.refresh_icon_radius,
+                self.refresh_spinner_em_px,
                 self.refresh_glyph_color(),
                 self.refresh_icon_stroke_width,
-                -self.refresh_spin_degrees * self._refresh_progress,
-                self.refresh_wheel_morph,
+                self.refresh_spin_degrees * self._refresh_progress,
+                1.0,
             )
         painter.restore()
         painter.end()
@@ -1926,7 +1932,19 @@ class TrimLineEdit(QtWidgets.QLineEdit):
         return "0" if text == "-0" else text
 
 
+METER_SETTLE_EPSILON = 1.0e-5
+
+
+def _meter_display_step(current: float, target: float, attack: float, decay: float) -> float:
+    alpha = attack if target >= current else decay
+    value = current + (target - current) * alpha
+    if abs(value - target) <= METER_SETTLE_EPSILON:
+        return target
+    return value
+
+
 class VUMeter(QtWidgets.QWidget):
+    USES_INSTANT_METERING = False
     METER_ATTACK = 0.52
     METER_DECAY = 0.12
     PEAK_DECAY = 0.965
@@ -1941,10 +1959,14 @@ class VUMeter(QtWidgets.QWidget):
         self.setMaximumWidth(52)
 
     def set_level(self, value: float) -> None:
-        self.level = min(1.0, max(0.0, float(value)))
-        attack = self.METER_ATTACK if self.level > self.display_level else self.METER_DECAY
-        self.display_level += (self.level - self.display_level) * attack
-        self.peak = max(self.level, self.peak * self.PEAK_DECAY)
+        level = min(1.0, max(0.0, float(value)))
+        display_level = _meter_display_step(self.display_level, level, self.METER_ATTACK, self.METER_DECAY)
+        peak = max(level, self.peak * self.PEAK_DECAY)
+        if level == self.level and display_level == self.display_level and peak == self.peak:
+            return
+        self.level = level
+        self.display_level = display_level
+        self.peak = peak
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1991,6 +2013,7 @@ class StereoSumMeter(QtWidgets.QWidget):
     BAR_TOP_OFFSET = 40
     TICK_LABEL_OFFSET = 15
     FIXED_HEIGHT = CHANNEL_PANEL_HEIGHT * 2 + CHANNEL_PANEL_GAP + HELPER_TOP_GAP + HELPER_HEIGHT
+    USES_INSTANT_METERING = False
     METER_ATTACK = 0.56
     METER_DECAY = 0.12
 
@@ -2016,20 +2039,30 @@ class StereoSumMeter(QtWidgets.QWidget):
 
     def set_levels(self, left: float, right: float) -> None:
         now = monotonic()
-        self.left_level = max(0.0, float(left))
-        self.right_level = max(0.0, float(right))
-        if self.left_level >= 1.0:
+        left_level = max(0.0, float(left))
+        right_level = max(0.0, float(right))
+        clip_latched = False
+        if left_level >= 1.0:
             self.left_clip_until = now + self.CLIP_HOLD_SECONDS
-        if self.right_level >= 1.0:
+            clip_latched = True
+        if right_level >= 1.0:
             self.right_clip_until = now + self.CLIP_HOLD_SECONDS
-        self.left_display = self._smooth(self.left_display, self.left_level)
-        self.right_display = self._smooth(self.right_display, self.right_level)
+            clip_latched = True
+        left_display = _meter_display_step(self.left_display, left_level, self.METER_ATTACK, self.METER_DECAY)
+        right_display = _meter_display_step(self.right_display, right_level, self.METER_ATTACK, self.METER_DECAY)
+        if (
+            left_level == self.left_level
+            and right_level == self.right_level
+            and left_display == self.left_display
+            and right_display == self.right_display
+            and not clip_latched
+        ):
+            return
+        self.left_level = left_level
+        self.right_level = right_level
+        self.left_display = left_display
+        self.right_display = right_display
         self.update()
-
-    @staticmethod
-    def _smooth(current: float, target: float) -> float:
-        amount = StereoSumMeter.METER_ATTACK if target > current else StereoSumMeter.METER_DECAY
-        return current + (target - current) * amount
 
     @staticmethod
     def _fraction_for_level(value: float) -> float:
@@ -2102,6 +2135,7 @@ class StereoSumMeter(QtWidgets.QWidget):
 
 
 class ChannelTile(QtWidgets.QWidget):
+    USES_INSTANT_METERING = False
     METER_ATTACK = 0.60
     METER_DECAY = 0.11
 
@@ -2122,16 +2156,19 @@ class ChannelTile(QtWidgets.QWidget):
         self.update()
 
     def set_level(self, value: float) -> None:
-        self.level = min(1.0, max(0.0, float(value)))
-        attack = self.METER_ATTACK if self.level > self.display_level else self.METER_DECAY
-        self.display_level += (self.level - self.display_level) * attack
+        level = min(1.0, max(0.0, float(value)))
+        display_level = _meter_display_step(self.display_level, level, self.METER_ATTACK, self.METER_DECAY)
+        if level == self.level and display_level == self.display_level:
+            return
+        self.level = level
+        self.display_level = display_level
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         width, height = self.width(), self.height()
-        active = self.display_level > 0.01
+        active = self.display_level > 0.0001
 
         bg = "#050505" if active else "#020202"
         border = "#303030" if active else "#202020"
@@ -2156,7 +2193,7 @@ class ChannelTile(QtWidgets.QWidget):
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor("#161616"))
         painter.drawRoundedRect(bar, 3, 3)
-        if self.display_level > 0.002:
+        if self.display_level > 0.0001:
             fill = QtCore.QRectF(bar.left(), bar.top(), bar.width() * self.display_level, bar.height())
             grad = QtGui.QLinearGradient(fill.left(), fill.top(), fill.right(), fill.top())
             grad.setColorAt(0.0, QtGui.QColor("#effff3"))
@@ -2171,6 +2208,7 @@ class ChannelTile(QtWidgets.QWidget):
 
 
 class RawChannelTile(QtWidgets.QWidget):
+    USES_INSTANT_METERING = False
     METER_ATTACK = 0.58
     METER_DECAY = 0.12
 
@@ -2185,17 +2223,21 @@ class RawChannelTile(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
     def set_levels(self, peak: float, rms: float) -> None:
-        self.peak = min(1.0, max(0.0, float(peak)))
-        self.rms = min(1.0, max(0.0, float(rms)))
-        attack = self.METER_ATTACK if self.peak > self.display_peak else self.METER_DECAY
-        self.display_peak += (self.peak - self.display_peak) * attack
+        peak = min(1.0, max(0.0, float(peak)))
+        rms = min(1.0, max(0.0, float(rms)))
+        display_peak = _meter_display_step(self.display_peak, peak, self.METER_ATTACK, self.METER_DECAY)
+        if peak == self.peak and rms == self.rms and display_peak == self.display_peak:
+            return
+        self.peak = peak
+        self.rms = rms
+        self.display_peak = display_peak
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         width, height = self.width(), self.height()
-        active = self.display_peak > 0.003
+        active = self.display_peak > 0.0001
 
         painter.setPen(QtGui.QPen(QtGui.QColor("#344237" if active else "#202020"), 1))
         painter.setBrush(QtGui.QColor("#080808" if active else "#020202"))
@@ -2215,7 +2257,7 @@ class RawChannelTile(QtWidgets.QWidget):
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor("#1a1a1a"))
         painter.drawRoundedRect(bar, 2, 2)
-        if self.display_peak > 0.002:
+        if self.display_peak > 0.0001:
             fill = QtCore.QRectF(bar.left(), bar.top(), bar.width() * self.display_peak, bar.height())
             grad = QtGui.QLinearGradient(fill.left(), fill.top(), fill.right(), fill.top())
             grad.setColorAt(0.0, QtGui.QColor("#ffffff"))
@@ -2225,7 +2267,10 @@ class RawChannelTile(QtWidgets.QWidget):
 
 
 class RoomVisualizer(QtWidgets.QWidget):
-    ACTIVE_THRESHOLD = 0.01
+    USES_INSTANT_METERING = False
+    METER_ATTACK = 0.60
+    METER_DECAY = 0.10
+    ACTIVE_THRESHOLD = 0.0001
     FIXED_HEIGHT = 360
     ROOM_ASPECT = 1.55
     IDLE_ANIMATION_INTERVAL_MS = 55
@@ -2243,6 +2288,7 @@ class RoomVisualizer(QtWidgets.QWidget):
         self.view_mode = "3d"
         self.channel_config = DEFAULT_CHANNEL_CONFIG
         self.levels = [0.0] * 16
+        self.display_levels = [0.0] * 16
         self.phase = 0.0
         self.camera_yaw = self.DEFAULT_YAW
         self.camera_pitch = self.DEFAULT_PITCH
@@ -2284,7 +2330,7 @@ class RoomVisualizer(QtWidgets.QWidget):
 
     @property
     def active_speaker_count(self) -> int:
-        return sum(1 for index, *_ in self.current_speakers if self._speaker_level(index) > self.ACTIVE_THRESHOLD)
+        return sum(1 for index, *_ in self.current_speakers if self._speaker_exact_level(index) > self.ACTIVE_THRESHOLD)
 
     def set_channel_config(self, config_id: str) -> None:
         self.channel_config = config_id if config_id in CHANNEL_LAYOUTS else DEFAULT_CHANNEL_CONFIG
@@ -2292,9 +2338,23 @@ class RoomVisualizer(QtWidgets.QWidget):
         self.update()
 
     def set_levels(self, levels: object) -> None:
+        changed = False
         for index in range(16):
-            self.levels[index] = float(levels[index]) if index < len(levels) else 0.0
-        self.update()
+            level = float(levels[index]) if index < len(levels) else 0.0
+            display_level = _meter_display_step(
+                self.display_levels[index],
+                level,
+                self.METER_ATTACK,
+                self.METER_DECAY,
+            )
+            if level != self.levels[index]:
+                self.levels[index] = level
+                changed = True
+            if display_level != self.display_levels[index]:
+                self.display_levels[index] = display_level
+                changed = True
+        if changed:
+            self.update()
 
     def mousePressEvent(self, event) -> None:
         if self._view_3d_rect.contains(event.pos()):
@@ -2602,38 +2662,41 @@ class RoomVisualizer(QtWidgets.QWidget):
         painter.drawText(label_rect, QtCore.Qt.AlignCenter, label)
 
     def _speaker_level(self, source_index: int) -> float:
+        return float(self.display_levels[source_index]) if 0 <= source_index < len(self.display_levels) else 0.0
+
+    def _speaker_exact_level(self, source_index: int) -> float:
         return float(self.levels[source_index]) if 0 <= source_index < len(self.levels) else 0.0
 
     @staticmethod
     def _speakers_for_config(config_id: str) -> list[tuple[int, str, float, float, float]]:
         if config_id == "sharur_9_1_6":
             return [
-                (0, "L", 0.34, 0.14, 0.22),
-                (2, "C", 0.50, 0.10, 0.22),
-                (1, "R", 0.66, 0.14, 0.22),
+                (0, "FL", 0.34, 0.14, 0.22),
+                (2, "FC", 0.50, 0.10, 0.22),
+                (1, "FR", 0.66, 0.14, 0.22),
                 (3, "LFE", 0.50, 0.23, 0.10),
-                (4, "Lw", 0.20, 0.34, 0.22),
-                (10, "Ltf", 0.36, 0.34, 0.92),
-                (11, "Rtf", 0.64, 0.34, 0.92),
-                (5, "Rw", 0.80, 0.34, 0.22),
-                (8, "Ls", 0.10, 0.56, 0.24),
-                (12, "Ltm", 0.36, 0.56, 0.92),
-                (13, "Rtm", 0.64, 0.56, 0.92),
-                (9, "Rs", 0.90, 0.56, 0.24),
-                (14, "Ltr", 0.36, 0.76, 0.92),
-                (15, "Rtr", 0.64, 0.76, 0.92),
-                (6, "Lrs", 0.28, 0.87, 0.22),
-                (7, "Rrs", 0.72, 0.87, 0.22),
+                (4, "BL", 0.20, 0.34, 0.22),
+                (10, "TFL", 0.36, 0.34, 0.92),
+                (11, "TFR", 0.64, 0.34, 0.92),
+                (5, "BR", 0.80, 0.34, 0.22),
+                (8, "SL", 0.10, 0.56, 0.24),
+                (12, "TSL", 0.36, 0.56, 0.92),
+                (13, "TSR", 0.64, 0.56, 0.92),
+                (9, "SR", 0.90, 0.56, 0.24),
+                (14, "TBL", 0.36, 0.76, 0.92),
+                (15, "TBR", 0.64, 0.76, 0.92),
+                (6, "BLC", 0.28, 0.87, 0.22),
+                (7, "BRC", 0.72, 0.87, 0.22),
             ]
         return [
-            (0, "L", 0.28, 0.14, 0.22),
-            (2, "C", 0.50, 0.10, 0.22),
-            (1, "R", 0.72, 0.14, 0.22),
+            (0, "FL", 0.28, 0.14, 0.22),
+            (2, "FC", 0.50, 0.10, 0.22),
+            (1, "FR", 0.72, 0.14, 0.22),
             (3, "LFE", 0.50, 0.24, 0.10),
             (6, "SL", 0.10, 0.56, 0.22),
             (7, "SR", 0.90, 0.56, 0.22),
-            (4, "RL", 0.28, 0.86, 0.22),
-            (5, "RR", 0.72, 0.86, 0.22),
+            (4, "BL", 0.28, 0.86, 0.22),
+            (5, "BR", 0.72, 0.86, 0.22),
         ]
 
 
@@ -2730,6 +2793,22 @@ class RouteProbeWorker(QtCore.QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class DeviceRefreshWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, force_refresh: bool = True) -> None:
+        super().__init__()
+        self.force_refresh = bool(force_refresh)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(list_devices(force_refresh=self.force_refresh))
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 DETAIL_SECTIONS = (
     (
         "Important Details",
@@ -2800,6 +2879,8 @@ def build_details_body() -> QtWidgets.QWidget:
 class RendererWindow(QtWidgets.QWidget):
     IDLE_ROOM_INTERVAL_MS = RoomVisualizer.IDLE_ANIMATION_INTERVAL_MS
     AUDIO_SAFE_ROOM_INTERVAL_MS = RoomVisualizer.AUDIO_SAFE_ANIMATION_INTERVAL_MS
+    IDLE_BACKDROP_INTERVAL_MS = 70
+    AUDIO_SAFE_BACKDROP_INTERVAL_MS = 120
 
     def __init__(self) -> None:
         super().__init__()
@@ -2834,7 +2915,8 @@ class RendererWindow(QtWidgets.QWidget):
         self.engine.processor.set_channel_sanity_enabled(False)
         self.engine.processor.set_sound_enhancer_enabled(self.sound_enhancer_enabled)
         self.engine.processor.set_user_volume(1.0)
-        self.all_devices = list_devices()
+        self._startup_device_error = ""
+        self.all_devices = self._safe_initial_device_inventory()
         self.devices = [dev for dev in self.all_devices if dev.hostapi == WASAPI_HOSTAPI]
         self.device_by_id = {dev.id: dev for dev in self.devices}
         self._device_signature = self._make_device_signature(self.all_devices)
@@ -2848,7 +2930,9 @@ class RendererWindow(QtWidgets.QWidget):
         self.engine.processor.set_monitor_layout(self.channel_config)
         self._restoring = False
         self._last_default_output_id: int | None = None
+        self._last_default_output_signature: tuple[object, ...] | None = None
         self._manual_override_default_id: int | None = None
+        self._manual_override_default_signature: tuple[object, ...] | None = None
         self._force_auto_start = bool(
             self.settings.get(
                 "resume_on_launch",
@@ -2862,10 +2946,21 @@ class RendererWindow(QtWidgets.QWidget):
         self._probe_thread: QtCore.QThread | None = None
         self._probe_worker: RouteProbeWorker | None = None
         self._probe_restore_running = False
+        self._device_refresh_thread: QtCore.QThread | None = None
+        self._device_refresh_worker: DeviceRefreshWorker | None = None
+        self._device_refresh_was_running = False
+        self._device_poll_thread: QtCore.QThread | None = None
+        self._device_poll_worker: DeviceRefreshWorker | None = None
+        self._device_poll_was_running = False
         self._last_callback_status_count = 0
         self._silent_input_started_at: float | None = None
         self._last_audio_recovery_at = -RECOVERY_COOLDOWN_SECONDS
         self._audio_start_generation = 0
+        self._pending_direct_output_resume_generation: int | None = None
+        self._direct_output_handoff_generation: int | None = None
+        self._direct_output_handoff_started_at: float | None = None
+        self._direct_output_handoff_silent_started_at: float | None = None
+        self._direct_output_handoff_bridge_logged = False
         self._liveness_rebuilds = 0
         self._device_lifecycle_events: list[str] = []
         self._device_diagnostics_enabled = os.environ.get("DOWNMIX_RENDERER_DIAGNOSTICS", "").strip() == "1"
@@ -2901,27 +2996,39 @@ class RendererWindow(QtWidgets.QWidget):
         self._sync_input_device_presentation()
         self._wire_events()
         self._sync_keep_output_awake()
-        self._repair_system_boot_autostart()
+        if self._startup_device_error:
+            self._set_status("Device scan failed; press refresh", "warning")
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_ui)
         self.timer.start(40)
 
         self.device_timer = QtCore.QTimer(self)
-        self.device_timer.timeout.connect(self.poll_devices)
+        self.device_timer.timeout.connect(self._poll_devices_from_timer)
         self.device_timer.start(DEVICE_POLL_INTERVAL_MS)
 
         self.backdrop_timer = QtCore.QTimer(self)
         self.backdrop_timer.timeout.connect(self._advance_backdrop)
-        self.backdrop_timer.start(70)
+        self.backdrop_timer.start(self.IDLE_BACKDROP_INTERVAL_MS)
 
+        QtCore.QTimer.singleShot(0, self._sync_system_boot_autostart_after_launch)
         QtCore.QTimer.singleShot(300, self._auto_start_if_needed)
+
+    def _safe_initial_device_inventory(self) -> list[AudioDevice]:
+        try:
+            return list_devices()
+        except Exception as exc:
+            self._startup_device_error = f"{type(exc).__name__}: {exc}"
+            return []
 
     def _sync_visual_performance(self, rendering: bool) -> None:
         rendering = bool(rendering)
         room_interval = self.AUDIO_SAFE_ROOM_INTERVAL_MS if rendering else self.IDLE_ROOM_INTERVAL_MS
         if hasattr(self, "room_visualizer"):
             self.room_visualizer.set_animation_interval(room_interval)
+        backdrop_interval = self.AUDIO_SAFE_BACKDROP_INTERVAL_MS if rendering else self.IDLE_BACKDROP_INTERVAL_MS
+        if hasattr(self, "backdrop_timer") and self.backdrop_timer.interval() != backdrop_interval:
+            self.backdrop_timer.setInterval(backdrop_interval)
 
     def _advance_backdrop(self) -> None:
         if not self.isVisible() or self.isMinimized():
@@ -2971,10 +3078,18 @@ class RendererWindow(QtWidgets.QWidget):
         if not self._closing_with_animation:
             event.ignore()
             self._closing_with_animation = True
+            for timer_name in ("timer", "device_timer", "backdrop_timer", "_peq_apply_timer"):
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    timer.stop()
             self._persist_state(was_running=self.engine.snapshot().running)
             self._close_raw_monitor_dialog()
             self.engine.close()
             self._animate_opacity(self.windowOpacity(), 0.0, 130, QtCore.QEasingCurve.InCubic, self.close)
+            return
+        if self._device_inventory_worker_active() or (self._probe_thread is not None and self._probe_thread.isRunning()):
+            event.ignore()
+            QtCore.QTimer.singleShot(80, self.close)
             return
         destroy_windows_icon_handles(self._windows_icon_handles)
         self._windows_icon_handles = []
@@ -3656,9 +3771,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.smart_switch_checkbox = SwitchCheckBox("Smart Switching")
         self.smart_switch_checkbox.setChecked(bool(self.settings.get("smart_switch_enabled", True)))
         self.system_boot_checkbox = SwitchCheckBox("Auto-start on Boot")
-        self.system_boot_checkbox.setChecked(
-            bool(self.settings.get("system_boot_autostart", False) or is_system_autostart_enabled(self._app_root))
-        )
+        self.system_boot_checkbox.setChecked(bool(self.settings.get("system_boot_autostart", False)))
         for checkbox in (self.smart_switch_checkbox, self.system_boot_checkbox):
             checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
 
@@ -3776,7 +3889,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.save_preset_button.clicked.connect(self.save_active_preset)
         self.delete_preset_button.clicked.connect(self.delete_active_preset)
         self.raw_monitor_button.clicked.connect(self.open_raw_monitor)
-        self.refresh_devices_button.clicked.connect(self.refresh_devices)
+        self.refresh_devices_button.clicked.connect(self._refresh_devices_from_button)
         self.surround_fill_checkbox.toggled.connect(self.update_surround_fill)
         self.upmix916_checkbox.toggled.connect(self.update_upmix_9_1_6)
         self.sound_enhancer_checkbox.toggled.connect(self.update_sound_enhancer)
@@ -4132,6 +4245,9 @@ class RendererWindow(QtWidgets.QWidget):
         if manual:
             active_output = default_wasapi_output(self.all_devices)
             self._manual_override_default_id = active_output.id if active_output else self._last_default_output_id
+            self._manual_override_default_signature = self._default_output_signature(
+                active_output
+            ) or self._last_default_output_signature
         was_running = self.engine.snapshot().running
         input_pick, output_pick, missing_devices = self._resolve_preset_route(preset)
         self._restoring = True
@@ -4265,6 +4381,20 @@ class RendererWindow(QtWidgets.QWidget):
         if not ok:
             self._set_status(f"Boot autostart: {detail}", "warning")
 
+    def _sync_system_boot_autostart_after_launch(self) -> None:
+        if self._closing_with_animation:
+            return
+        if not getattr(self, "system_boot_checkbox", None):
+            return
+        enabled = is_system_autostart_enabled(self._app_root)
+        if enabled and not self.system_boot_checkbox.isChecked():
+            self.system_boot_checkbox.blockSignals(True)
+            self.system_boot_checkbox.setChecked(True)
+            self.system_boot_checkbox.blockSignals(False)
+            self._persist_state(was_running=self.engine.snapshot().running)
+            return
+        self._repair_system_boot_autostart()
+
     def set_channel_config(self, config_id: str, persist: bool = True) -> None:
         if config_id not in CHANNEL_LAYOUTS:
             config_id = DEFAULT_CHANNEL_CONFIG
@@ -4308,7 +4438,16 @@ class RendererWindow(QtWidgets.QWidget):
             self.tiles.append(tile)
 
     def _auto_start_if_needed(self) -> None:
+        if self._closing_with_animation:
+            return
         if not self._force_auto_start:
+            return
+        if self.engine.snapshot().running:
+            return
+        if self._pending_direct_output_resume_generation is not None:
+            return
+        if not self.devices:
+            self._set_status("Waiting for device route", "warning")
             return
         active_output = default_wasapi_output(self.all_devices)
         if self._should_pause_for_direct_output(active_output):
@@ -4324,52 +4463,154 @@ class RendererWindow(QtWidgets.QWidget):
             self._set_status(f"Device refresh failed: {exc}", "warning")
             return
 
+        self._apply_device_refresh_result(fresh_all, was_running)
+
+    def _refresh_devices_from_button(self) -> None:
+        if self._closing_with_animation:
+            return
+        if self._device_inventory_worker_active():
+            return
+
+        self._device_refresh_was_running = self.engine.snapshot().running
+        self._set_status("Refreshing devices", "neutral")
+
+        thread = QtCore.QThread(self)
+        worker = DeviceRefreshWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._finish_device_refresh)
+        worker.failed.connect(self._fail_device_refresh)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_device_refresh)
+        self._device_refresh_thread = thread
+        self._device_refresh_worker = worker
+        thread.start()
+
+    def _finish_device_refresh(self, fresh_all: object) -> None:
+        if self._closing_with_animation:
+            return
+        if isinstance(fresh_all, list):
+            self._apply_device_refresh_result(fresh_all, self._device_refresh_was_running)
+            return
+        self._set_status("Device refresh failed: invalid device inventory", "warning")
+
+    def _fail_device_refresh(self, detail: str) -> None:
+        if self._closing_with_animation:
+            return
+        self._set_status(f"Device refresh failed: {detail}", "warning")
+
+    def _cleanup_device_refresh(self) -> None:
+        self._device_refresh_thread = None
+        self._device_refresh_worker = None
+        self._device_refresh_was_running = False
+
+    def _apply_device_refresh_result(self, fresh_all: list[AudioDevice], was_running: bool) -> None:
         signature = self._make_device_signature(fresh_all)
         route_changed = self._refresh_device_lists(fresh_all, signature)
         active_output = default_wasapi_output(fresh_all)
-        self._last_default_output_id = active_output.id if active_output else None
+        self._observe_default_output(active_output)
         self._sync_renderer_with_windows_default_output(active_output, was_running=was_running)
         if route_changed:
             self._recover_after_device_refresh(was_running)
         self._set_status("Devices refreshed", "running" if self.engine.snapshot().running else "neutral")
 
-    def poll_devices(self) -> None:
+    def _device_inventory_worker_active(self) -> bool:
+        return any(
+            thread is not None and thread.isRunning()
+            for thread in (self._device_refresh_thread, self._device_poll_thread)
+        )
+
+    def _next_device_poll_force_refresh(self) -> bool:
         self._device_poll_count += 1
-        force_refresh = (
+        return (
             self._device_poll_count % DEVICE_FORCE_REFRESH_INTERVAL == 0
             and self._can_force_device_refresh()
         )
+
+    def _poll_devices_from_timer(self) -> None:
+        if self._closing_with_animation:
+            return
+        if self._device_inventory_worker_active():
+            return
+
+        force_refresh = self._next_device_poll_force_refresh()
+        self._device_poll_was_running = self.engine.snapshot().running
+
+        thread = QtCore.QThread(self)
+        worker = DeviceRefreshWorker(force_refresh=force_refresh)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._finish_device_poll)
+        worker.failed.connect(self._fail_device_poll)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_device_poll)
+        self._device_poll_thread = thread
+        self._device_poll_worker = worker
+        thread.start()
+
+    def _finish_device_poll(self, fresh_all: object) -> None:
+        if self._closing_with_animation:
+            return
+        if isinstance(fresh_all, list):
+            self._apply_device_poll_result(fresh_all, self._device_poll_was_running)
+
+    def _fail_device_poll(self, detail: str) -> None:
+        if self._closing_with_animation:
+            return
+        self._log_device_lifecycle("device_poll_failed", detail=detail)
+
+    def _cleanup_device_poll(self) -> None:
+        self._device_poll_thread = None
+        self._device_poll_worker = None
+        self._device_poll_was_running = False
+
+    def poll_devices(self) -> None:
+        force_refresh = self._next_device_poll_force_refresh()
         was_running = self.engine.snapshot().running
-        route_changed = False
         try:
             fresh_all = list_devices(force_refresh=force_refresh)
         except Exception:
             return
 
+        self._apply_device_poll_result(fresh_all, was_running)
+
+    def _apply_device_poll_result(self, fresh_all: list[AudioDevice], was_running: bool) -> None:
+        route_changed = False
         signature = self._make_device_signature(fresh_all)
         if signature != self._device_signature:
             route_changed = self._refresh_device_lists(fresh_all, signature)
 
         active_output = default_wasapi_output(fresh_all)
         active_id = active_output.id if active_output else None
-        if self._last_default_output_id is None:
-            self._last_default_output_id = active_id
-        if active_id != self._last_default_output_id:
-            self._last_default_output_id = active_id
-            self._manual_override_default_id = None
+        active_signature = self._default_output_signature(active_output)
+        self._observe_default_output(active_output)
         self._sync_renderer_with_windows_default_output(active_output, was_running=was_running)
 
         if self._preset_by_id(self.active_preset_id) is not None:
             self._guard_missing_active_route()
             if route_changed:
                 self._recover_after_device_refresh(was_running)
+            if self._force_auto_start and not self.engine.snapshot().running:
+                self._auto_start_if_needed()
             return
 
         if not getattr(self, "smart_switch_checkbox", None) or not self.smart_switch_checkbox.isChecked():
             if route_changed:
                 self._recover_after_device_refresh(was_running)
+            if self._force_auto_start and not self.engine.snapshot().running:
+                self._auto_start_if_needed()
             return
-        if active_id is not None and active_id == self._manual_override_default_id:
+        if (
+            active_id is not None
+            and active_id == self._manual_override_default_id
+            and active_signature == self._manual_override_default_signature
+        ):
             if route_changed:
                 self._recover_after_device_refresh(was_running)
             return
@@ -4378,10 +4619,14 @@ class RendererWindow(QtWidgets.QWidget):
             self._guard_missing_active_route()
             if route_changed:
                 self._recover_after_device_refresh(was_running)
+            if self._force_auto_start and not self.engine.snapshot().running:
+                self._auto_start_if_needed()
             return
         if preset.id == self.active_preset_id:
             if route_changed:
                 self._recover_after_device_refresh(was_running)
+            if self._force_auto_start and not self.engine.snapshot().running:
+                self._auto_start_if_needed()
             return
         self.apply_preset(preset.id, start_after=self.engine.snapshot().running or self._force_auto_start, manual=False)
 
@@ -4389,7 +4634,29 @@ class RendererWindow(QtWidgets.QWidget):
     def _should_pause_for_direct_output(active_output: AudioDevice | None) -> bool:
         return active_output is not None and not is_virtual_cable_output(active_output)
 
+    def _clear_direct_output_handoff(self) -> None:
+        self._direct_output_handoff_generation = None
+        self._direct_output_handoff_started_at = None
+        self._direct_output_handoff_silent_started_at = None
+        self._direct_output_handoff_bridge_logged = False
+
+    def _begin_direct_output_handoff(self) -> None:
+        if self._direct_output_handoff_generation is None:
+            self._direct_output_handoff_generation = self._audio_start_generation
+            self._direct_output_handoff_started_at = monotonic()
+            self._direct_output_handoff_silent_started_at = None
+            self._direct_output_handoff_bridge_logged = False
+            self._log_device_lifecycle(
+                "direct_output_handoff_begin",
+                generation=self._audio_start_generation,
+            )
+        self._force_auto_start = True
+        self._set_status("Direct output handoff", "running")
+        self._persist_state(was_running=True, auto_start=True)
+
     def _pause_for_direct_output(self) -> None:
+        self._clear_direct_output_handoff()
+        self._pending_direct_output_resume_generation = None
         self._audio_start_generation += 1
         self._log_device_lifecycle("pause_for_direct_output", generation=self._audio_start_generation)
         if self.engine.snapshot().running:
@@ -4399,6 +4666,43 @@ class RendererWindow(QtWidgets.QWidget):
         self._sync_keep_output_awake()
         self._set_status("Paused for direct output", "neutral")
         self._persist_state(was_running=False, auto_start=True)
+
+    def _schedule_direct_output_resume(self) -> None:
+        generation = self._audio_start_generation
+        self._pending_direct_output_resume_generation = generation
+        self._log_device_lifecycle(
+            "direct_output_resume_scheduled",
+            generation=generation,
+            delay_ms=DIRECT_OUTPUT_RESUME_SETTLE_MS,
+        )
+        QtCore.QTimer.singleShot(
+            DIRECT_OUTPUT_RESUME_SETTLE_MS,
+            lambda: self._complete_direct_output_resume(generation),
+        )
+
+    def _complete_direct_output_resume(self, generation: int) -> None:
+        if self._closing_with_animation:
+            return
+        if (
+            self._pending_direct_output_resume_generation != generation
+            or generation != self._audio_start_generation
+        ):
+            self._log_device_lifecycle(
+                "direct_output_resume_stale",
+                generation=generation,
+                active_generation=self._audio_start_generation,
+            )
+            return
+        self._pending_direct_output_resume_generation = None
+        active_output = self._fresh_default_output_for_restart_gate()
+        if active_output is None:
+            self._paused_for_direct_output = True
+            self._set_status("Waiting for Windows default output", "warning")
+            return
+        if self._should_pause_for_direct_output(active_output):
+            self._sync_renderer_with_windows_default_output(active_output, was_running=False)
+            return
+        self.start_audio()
 
     def _sync_renderer_with_windows_default_output(self, active_output: AudioDevice | None, was_running: bool) -> bool:
         if active_output is None:
@@ -4410,18 +4714,25 @@ class RendererWindow(QtWidgets.QWidget):
             was_running=was_running,
         )
         if is_virtual_cable_output(active_output):
+            self._clear_direct_output_handoff()
             if not self._paused_for_direct_output:
                 return False
             self._paused_for_direct_output = False
             self._sync_keep_output_awake()
             if self._force_auto_start or was_running:
-                self.start_audio()
+                self._schedule_direct_output_resume()
             else:
                 self._set_status("Standby", "neutral")
             return True
         if self._paused_for_direct_output:
             return False
-        if was_running or self.engine.snapshot().running or self._force_auto_start:
+        if self._direct_output_handoff_generation is not None:
+            return True
+        running_now = self.engine.snapshot().running
+        if was_running or running_now:
+            self._begin_direct_output_handoff()
+            return True
+        if self._force_auto_start:
             self._pause_for_direct_output()
             return True
         return False
@@ -4440,13 +4751,45 @@ class RendererWindow(QtWidgets.QWidget):
                 self.devices = [dev for dev in fresh_all if dev.hostapi == WASAPI_HOSTAPI]
                 self.device_by_id = {dev.id: dev for dev in self.devices}
         active_output = default_wasapi_output(fresh_all)
-        active_id = active_output.id if active_output else None
-        if active_id != self._last_default_output_id:
-            self._last_default_output_id = active_id
-            self._manual_override_default_id = None
+        self._observe_default_output(active_output)
         return active_output
 
+    def _observe_default_output(self, active_output: AudioDevice | None) -> bool:
+        active_id = active_output.id if active_output else None
+        active_signature = self._default_output_signature(active_output)
+        changed = (
+            self._last_default_output_signature is not None
+            and active_signature != self._last_default_output_signature
+        )
+        self._last_default_output_id = active_id
+        self._last_default_output_signature = active_signature
+        if changed:
+            self._manual_override_default_id = None
+            self._manual_override_default_signature = None
+            self._log_device_lifecycle(
+                "default_output_changed",
+                active=active_output.name if active_output else "",
+                direct=self._should_pause_for_direct_output(active_output),
+            )
+        return changed
+
+    @staticmethod
+    def _default_output_signature(active_output: AudioDevice | None) -> tuple[object, ...] | None:
+        if active_output is None:
+            return None
+        return (
+            active_output.native_endpoint_for("output") or "",
+            active_output.id,
+            active_output.name,
+            active_output.hostapi,
+            active_output.max_output_channels,
+            active_output.default_samplerate,
+            is_virtual_cable_output(active_output),
+        )
+
     def _automatic_restart_allowed(self, snapshot_running: bool) -> bool:
+        if self._pending_direct_output_resume_generation is not None:
+            return False
         if not snapshot_running and not self._force_auto_start:
             return False
         active_output = self._fresh_default_output_for_restart_gate()
@@ -4705,6 +5048,9 @@ class RendererWindow(QtWidgets.QWidget):
             return
         active_output = default_wasapi_output(self.all_devices)
         self._manual_override_default_id = active_output.id if active_output else self._last_default_output_id
+        self._manual_override_default_signature = self._default_output_signature(
+            active_output
+        ) or self._last_default_output_signature
         running = self.engine.snapshot().running
         self._persist_state(was_running=running)
         self._sync_keep_output_awake()
@@ -4810,16 +5156,95 @@ class RendererWindow(QtWidgets.QWidget):
             int(getattr(snapshot, "processed_frame_count", 0) or 0),
         )
 
+    @staticmethod
+    def _raw_input_peak_from_snapshot(snapshot) -> float:
+        try:
+            return max(abs(float(value)) for value in getattr(snapshot.dsp, "raw_channel_levels", ()))
+        except Exception:
+            return 0.0
+
+    def _maybe_pause_after_direct_output_handoff(self, snapshot) -> bool:
+        if self._direct_output_handoff_generation is None:
+            return False
+        if not getattr(snapshot, "running", False):
+            self._clear_direct_output_handoff()
+            return False
+
+        active_output = default_wasapi_output(self.all_devices)
+        if active_output is None:
+            return False
+        if is_virtual_cable_output(active_output):
+            self._clear_direct_output_handoff()
+            return False
+
+        now = monotonic()
+        raw_peak = self._raw_input_peak_from_snapshot(snapshot)
+        if raw_peak >= DIRECT_OUTPUT_HANDOFF_INPUT_ACTIVITY_THRESHOLD:
+            self._direct_output_handoff_silent_started_at = None
+            handoff_started_at = self._direct_output_handoff_started_at
+            if (
+                handoff_started_at is not None
+                and now - handoff_started_at >= DIRECT_OUTPUT_HANDOFF_BRIDGE_RETARGET_SECONDS
+                and self._retarget_direct_output_handoff_bridge(active_output)
+            ):
+                return True
+            if not self._direct_output_handoff_bridge_logged:
+                self._direct_output_handoff_bridge_logged = True
+                self._log_device_lifecycle(
+                    "direct_output_handoff_bridge_active",
+                    active=active_output.name,
+                    raw_peak=f"{raw_peak:.5f}",
+                )
+            return False
+
+        if self._direct_output_handoff_silent_started_at is None:
+            self._direct_output_handoff_silent_started_at = now
+            self._direct_output_handoff_bridge_logged = False
+            return False
+        if now - self._direct_output_handoff_silent_started_at < DIRECT_OUTPUT_HANDOFF_SILENCE_SECONDS:
+            return False
+
+        self._log_device_lifecycle(
+            "direct_output_handoff_silent_pause",
+            active=active_output.name,
+            generation=self._direct_output_handoff_generation,
+        )
+        self._pause_for_direct_output()
+        return True
+
+    def _retarget_direct_output_handoff_bridge(self, active_output: AudioDevice) -> bool:
+        current_output = self._selected_device(self.output_combo)
+        if self._route_device_signature(current_output) == self._route_device_signature(active_output):
+            return False
+
+        previous_restoring = self._restoring
+        self._restoring = True
+        try:
+            selected = self._set_combo_device(self.output_combo, active_output)
+        finally:
+            self._restoring = previous_restoring
+        if not selected:
+            return False
+
+        self._sync_keep_output_awake()
+        self._log_device_lifecycle(
+            "direct_output_handoff_bridge_retarget",
+            active=active_output.name,
+            generation=self._direct_output_handoff_generation,
+        )
+        self.start_audio(preserve_direct_output_handoff=True)
+        return True
+
     def _fallback_non_normal_on_warning(self, snapshot) -> bool:
         self._last_callback_status_count = snapshot.callback_status_count
         return False
 
     def _maybe_recover_audio_stream(self, snapshot) -> bool:
         now = monotonic()
-        if now - self._last_audio_recovery_at < RECOVERY_COOLDOWN_SECONDS:
-            return False
 
-        status_text = f"{getattr(snapshot, 'status', '')} {getattr(snapshot, 'callback_status', '')}".casefold()
+        status_text = str(getattr(snapshot, "status", "") or "").casefold()
+        callback_status_text = str(getattr(snapshot, "callback_status", "") or "").casefold()
+        callback_status_count = int(getattr(snapshot, "callback_status_count", 0) or 0)
         invalid_markers = (
             "audclnt_e_device_invalidated",
             "device invalidated",
@@ -4829,17 +5254,36 @@ class RendererWindow(QtWidgets.QWidget):
             "disconnected",
             "unplugged",
         )
-        if any(marker in status_text for marker in invalid_markers):
+        invalid_status = any(marker in status_text for marker in invalid_markers)
+        invalid_callback_status = any(marker in callback_status_text for marker in invalid_markers)
+        if invalid_status or invalid_callback_status:
+            if callback_status_count > 0:
+                if callback_status_count <= self._last_callback_status_count:
+                    return False
+                self._last_callback_status_count = callback_status_count
             return self._recover_audio_stream(
                 "Audio route recovered",
                 now,
                 snapshot_running=bool(getattr(snapshot, "running", False)),
             )
 
+        stopped_markers = ("stopped", "failed", "lost")
+        stopped_status = any(marker in status_text for marker in stopped_markers)
+        stopped_callback_status = any(marker in callback_status_text for marker in stopped_markers)
+        if not getattr(snapshot, "running", False) and self._force_auto_start and (
+            stopped_status or stopped_callback_status
+        ):
+            if callback_status_count > 0:
+                if callback_status_count <= self._last_callback_status_count:
+                    return False
+                self._last_callback_status_count = callback_status_count
+            return self._recover_audio_stream("Audio stream restarted", now, snapshot_running=False)
+
+        if now - self._last_audio_recovery_at < RECOVERY_COOLDOWN_SECONDS:
+            return False
+
         if not getattr(snapshot, "running", False):
             self._silent_input_started_at = None
-            if self._force_auto_start and any(marker in status_text for marker in ("stopped", "failed", "lost")):
-                return self._recover_audio_stream("Audio stream restarted", now, snapshot_running=False)
             return False
 
         dsp = snapshot.dsp
@@ -4848,10 +5292,7 @@ class RendererWindow(QtWidgets.QWidget):
             self._silent_input_started_at = None
             return False
 
-        try:
-            raw_peak = max(abs(float(value)) for value in getattr(dsp, "raw_channel_levels", ()))
-        except Exception:
-            raw_peak = 0.0
+        raw_peak = self._raw_input_peak_from_snapshot(snapshot)
         output_peak = max(abs(float(getattr(dsp, "left_meter", 0.0))), abs(float(getattr(dsp, "right_meter", 0.0))))
 
         if raw_peak >= RECOVERY_INPUT_ACTIVITY_THRESHOLD and output_peak <= RECOVERY_OUTPUT_SILENCE_THRESHOLD:
@@ -4887,7 +5328,10 @@ class RendererWindow(QtWidgets.QWidget):
         else:
             self.start_audio()
 
-    def start_audio(self, liveness_attempt: int = 0) -> None:
+    def start_audio(self, liveness_attempt: int = 0, preserve_direct_output_handoff: bool = False) -> None:
+        if not preserve_direct_output_handoff:
+            self._clear_direct_output_handoff()
+        self._pending_direct_output_resume_generation = None
         input_device = self._selected_device(self.input_combo)
         output_device = self._selected_device(self.output_combo)
         if input_device is None or output_device is None:
@@ -4916,6 +5360,11 @@ class RendererWindow(QtWidgets.QWidget):
                 self._set_status("Running", "running")
             self._paused_for_direct_output = False
             self._force_auto_start = True
+            if preserve_direct_output_handoff:
+                self._direct_output_handoff_generation = generation
+                if self._direct_output_handoff_started_at is None:
+                    self._direct_output_handoff_started_at = monotonic()
+                self._direct_output_handoff_silent_started_at = None
             self._reset_callback_window()
             self._persist_state(was_running=True)
             callbacks, frames = self._stream_liveness_counters()
@@ -4935,6 +5384,8 @@ class RendererWindow(QtWidgets.QWidget):
 
     def stop_audio(self) -> None:
         self._paused_for_direct_output = False
+        self._clear_direct_output_handoff()
+        self._pending_direct_output_resume_generation = None
         self._audio_start_generation += 1
         self._log_device_lifecycle("manual_stop", generation=self._audio_start_generation)
         self.engine.stop()
@@ -5018,6 +5469,8 @@ class RendererWindow(QtWidgets.QWidget):
         dsp = snapshot.dsp
         self._update_header_status(snapshot)
         self._sync_visual_performance(snapshot.running)
+        if self._maybe_pause_after_direct_output_handoff(snapshot):
+            return
         if self._maybe_recover_audio_stream(snapshot):
             return
         if self._fallback_non_normal_on_warning(snapshot):
@@ -5044,10 +5497,13 @@ class RendererWindow(QtWidgets.QWidget):
                 self._set_status("Running", "running")
 
         active_preset = self._preset_by_id(self.active_preset_id)
-        self.diag_labels["Preset"].setText(active_preset.name if active_preset else "--")
-        self.diag_labels["Route"].setText(snapshot.route)
-        self.diag_labels["Channels"].setText(f"{self.channel_config_label()} | {snapshot.input_channels or '--'} in -> 2 out")
-        self.diag_labels["Layout"].setText(self._layout_diagnostic_text(dsp))
+        self._set_label_text_if_changed(self.diag_labels["Preset"], active_preset.name if active_preset else "--")
+        self._set_label_text_if_changed(self.diag_labels["Route"], snapshot.route)
+        self._set_label_text_if_changed(
+            self.diag_labels["Channels"],
+            f"{self.channel_config_label()} | {snapshot.input_channels or '--'} in -> 2 out",
+        )
+        self._set_label_text_if_changed(self.diag_labels["Layout"], self._layout_diagnostic_text(dsp))
         if snapshot.stream_latency:
             in_latency, out_latency = snapshot.stream_latency
             profile_label = STREAM_PROFILES.get(snapshot.stream_profile, snapshot.stream_profile)
@@ -5059,14 +5515,17 @@ class RendererWindow(QtWidgets.QWidget):
             stream_text = "--"
         if snapshot.callback_status_count:
             stream_text = f"{stream_text} | {snapshot.callback_status_count}x {snapshot.callback_status}"
-        self.diag_labels["Stream"].setText(stream_text)
-        self.diag_labels["Limiter"].setText(f"{dsp.limiter_gain:.3f}" + (" clip" if dsp.clipping else ""))
+        self._set_label_text_if_changed(self.diag_labels["Stream"], stream_text)
+        self._set_label_text_if_changed(
+            self.diag_labels["Limiter"],
+            f"{dsp.limiter_gain:.3f}" + (" clip" if dsp.clipping else ""),
+        )
         enhancer_text = "off"
         if dsp.sound_enhancer_enabled:
             enhancer_text = f"{dsp.sound_enhancer_gain:.3f}x"
             if dsp.sound_enhancer_gain < 1.0:
                 enhancer_text += " protected"
-        self.diag_labels["Enhancer"].setText(enhancer_text)
+        self._set_label_text_if_changed(self.diag_labels["Enhancer"], enhancer_text)
         fill_parts = []
         if dsp.surround_fill_enabled:
             fill_parts.append("7.1 upmix active" if dsp.surround_fill_active else "7.1 upmix armed")
@@ -5077,20 +5536,28 @@ class RendererWindow(QtWidgets.QWidget):
         else:
             fill_parts.append("9.1.6 off")
         fill_parts.append(self._peq_diagnostic_text())
-        self.diag_labels["Upmix"].setText(" | ".join(fill_parts) if fill_parts else "off")
-        active = [tile.name for tile in self.tiles if tile.display_level > 0.01]
-        self.diag_labels["Active"].setText(", ".join(active) if active else "--")
+        self._set_label_text_if_changed(self.diag_labels["Upmix"], " | ".join(fill_parts) if fill_parts else "off")
+        active = [tile.name for tile in self.tiles if tile.level > RoomVisualizer.ACTIVE_THRESHOLD]
+        self._set_label_text_if_changed(self.diag_labels["Active"], ", ".join(active) if active else "--")
         keep_awake = "keep-awake on" if self.keep_output_awake_enabled else "keep-awake off"
         output_name = self.output_combo.currentText().split("  [", 1)[0] if hasattr(self, "output_combo") else "--"
-        self.diag_labels["Output"].setText(f"{output_name or '--'} | Windows {sys_text} ({source}) | {keep_awake}")
+        self._set_label_text_if_changed(
+            self.diag_labels["Output"],
+            f"{output_name or '--'} | Windows {sys_text} ({source}) | {keep_awake}",
+        )
 
     def _update_header_status(self, snapshot) -> None:
         if not hasattr(self, "header_status"):
             return
         if snapshot.running:
-            self.header_status.setText("Shared WASAPI | ULTRA Mode")
+            self._set_label_text_if_changed(self.header_status, "Shared WASAPI | ULTRA Mode")
         else:
-            self.header_status.setText("Shared WASAPI | Ready")
+            self._set_label_text_if_changed(self.header_status, "Shared WASAPI | Ready")
+
+    @staticmethod
+    def _set_label_text_if_changed(label: QtWidgets.QLabel, text: str) -> None:
+        if label.text() != text:
+            label.setText(text)
 
     def channel_config_label(self) -> str:
         return str(CHANNEL_LAYOUTS[self.channel_config]["label"])
@@ -5139,6 +5606,8 @@ class RendererWindow(QtWidgets.QWidget):
         self.raw_monitor_dialog = None
 
     def start_route_probe(self) -> None:
+        if self._closing_with_animation:
+            return
         if self._probe_thread is not None and self._probe_thread.isRunning():
             return
 
@@ -5170,6 +5639,8 @@ class RendererWindow(QtWidgets.QWidget):
         thread.start()
 
     def _finish_route_probe(self, report: object, path: str) -> None:
+        if self._closing_with_animation:
+            return
         capture = report.get("capture", {}) if isinstance(report, dict) else {}
         truth = str(capture.get("truth", "unknown"))
         peaks = capture.get("peaks", [])
@@ -5187,6 +5658,8 @@ class RendererWindow(QtWidgets.QWidget):
             self.start_audio()
 
     def _fail_route_probe(self, detail: str) -> None:
+        if self._closing_with_animation:
+            return
         if "Output" in self.diag_labels:
             self.diag_labels["Output"].setText(f"Probe failed | {detail}")
         self._set_status("Probe failed", "error")
@@ -5200,6 +5673,8 @@ class RendererWindow(QtWidgets.QWidget):
         self._probe_worker = None
 
     def _set_status(self, text: str, status: str) -> None:
+        if getattr(self, "_status_text", None) == text and getattr(self, "_status_state", None) == status:
+            return
         self._status_text = text
         self._status_state = status
         self._sync_render_toggle()
@@ -5258,7 +5733,18 @@ def apply_windows_app_user_model_id() -> None:
         return
 
 
+def configure_qt_scaling() -> None:
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    try:
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        return
+
+
 def main() -> int:
+    configure_qt_scaling()
     apply_windows_app_user_model_id()
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_DISPLAY_NAME)

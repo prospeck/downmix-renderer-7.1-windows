@@ -47,4 +47,6 @@ Interpretation:
 - Windows volume keys are followed through CoreAudio endpoint volume and applied as a separate post-render master gain.
 - Device settings now persist by stable identity instead of numeric PortAudio IDs only.
 - The UI now includes route, channel-count, volume, limiter, and active-channel diagnostics.
-
+- Output-device switching is now verified by user playback testing for both Apple Music Dolby Atmos and Lossless tracks.
+- The final switching behavior keeps ownership inside the renderer bridge: Dolby Atmos/direct reroutes can pause/release when VB-CABLE goes silent, while Lossless tracks that continue feeding VB-CABLE cause the renderer bridge to retarget to the newly selected physical output without Apple Music automation or a track change.
+- Future route work should preserve `_sync_renderer_with_windows_default_output()`, `_maybe_pause_after_direct_output_handoff()`, `_retarget_direct_output_handoff_bridge()`, `_maybe_recover_audio_stream()`, and `_verify_audio_liveness()` as one coordinated state machine unless a new regression test proves a safer replacement.

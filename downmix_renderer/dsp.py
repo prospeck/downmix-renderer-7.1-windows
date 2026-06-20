@@ -56,6 +56,7 @@ SOUND_ENHANCER_CEILING = 10 ** (SOUND_ENHANCER_CEILING_DB / 20.0)
 SOUND_ENHANCER_ATTACK_ALPHA = 0.85
 SOUND_ENHANCER_RELEASE_ALPHA = 0.08
 SOUND_ENHANCER_TRUE_PEAK_FRACTIONS = (0.25, 0.5, 0.75)
+SOUND_ENHANCER_GAIN_RAMP_SAMPLES = 64
 
 
 def db_to_linear(db_value: float) -> float:
@@ -224,6 +225,8 @@ class DownmixProcessor:
         self._stereo = np.zeros((0, OUTPUT_CHANNELS), dtype=np.float64)
         self._stereo_abs = np.zeros((0, OUTPUT_CHANNELS), dtype=np.float64)
         self._mono_abs = np.zeros(0, dtype=np.float64)
+        self._sound_enhancer_gain_curve = np.zeros(0, dtype=np.float64)
+        self._sound_enhancer_ramp_positions = np.zeros(0, dtype=np.float64)
         self._dry_delay_buffer = np.zeros((self._dry_delay_samples, max_channels), dtype=np.float32)
         self._lfe_lowpass_sos = _butterworth_lowpass_sos(LFE_LOWPASS_CUTOFF_HZ, self.sample_rate)
         self._lfe_filter_state = np.zeros((len(self._lfe_lowpass_sos), 2), dtype=np.float64)
@@ -537,6 +540,8 @@ class DownmixProcessor:
         self._stereo = np.zeros((capacity, OUTPUT_CHANNELS), dtype=np.float64)
         self._stereo_abs = np.zeros((capacity, OUTPUT_CHANNELS), dtype=np.float64)
         self._mono_abs = np.zeros(capacity, dtype=np.float64)
+        self._sound_enhancer_gain_curve = np.zeros(capacity, dtype=np.float64)
+        self._sound_enhancer_ramp_positions = np.arange(capacity, dtype=np.float64)
         self._peq_old_stereo = np.zeros((capacity, OUTPUT_CHANNELS), dtype=np.float64)
 
     def _prepare_input(self, indata: np.ndarray, frames: int, channels: int) -> np.ndarray:
@@ -627,7 +632,22 @@ class DownmixProcessor:
         self._sound_enhancer_safety_gain = smoothed_safety_gain
 
         applied_gain = SOUND_ENHANCER_MAKEUP_GAIN * applied_safety_gain
-        self._stereo[:frames] *= applied_gain
+        previous_gain = self._sound_enhancer_applied_gain
+        if not math.isfinite(previous_gain) or previous_gain <= 0.0:
+            previous_gain = applied_gain
+        start_gain = min(previous_gain, applied_gain)
+        ramp_frames = min(frames, SOUND_ENHANCER_GAIN_RAMP_SAMPLES)
+        if ramp_frames > 1 and abs(applied_gain - start_gain) > 1e-6:
+            ramp = self._sound_enhancer_gain_curve[:ramp_frames]
+            ramp[:] = start_gain + (
+                (applied_gain - start_gain)
+                * (self._sound_enhancer_ramp_positions[:ramp_frames] / float(ramp_frames - 1))
+            )
+            self._stereo[:ramp_frames] *= ramp[:, None]
+            if ramp_frames < frames:
+                self._stereo[ramp_frames:frames] *= applied_gain
+        else:
+            self._stereo[:frames] *= applied_gain
 
         post_peak = self._estimate_true_peak_stereo(self._stereo[:frames], frames)
         if post_peak > SOUND_ENHANCER_CEILING:

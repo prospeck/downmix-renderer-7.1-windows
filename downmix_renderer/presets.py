@@ -33,6 +33,8 @@ GENERIC_OUTPUT_KEYWORDS = {
     "speaker",
     "speakers",
 }
+PREAMP_MIN_DB = -20
+PREAMP_MAX_DB = 0
 
 
 @dataclass
@@ -69,8 +71,8 @@ class Preset:
             name=str(data.get("name") or "Preset"),
             input_device=data.get("input_device") if isinstance(data.get("input_device"), dict) else None,
             output_device=data.get("output_device") if isinstance(data.get("output_device"), dict) else None,
-            preamp_db=int(data.get("preamp_db", DEFAULT_PREAMP_DB)),
-            user_volume=float(data.get("user_volume", 1.0)),
+            preamp_db=_normalize_preamp_db(data.get("preamp_db", DEFAULT_PREAMP_DB)),
+            user_volume=_normalize_user_volume(data.get("user_volume", 1.0)),
             channel_config=str(data.get("channel_config", DEFAULT_CHANNEL_CONFIG)),
             surround_fill_enabled=bool(data.get("surround_fill_enabled", False)),
             upmix_9_1_6_enabled=bool(data.get("upmix_9_1_6_enabled", False)),
@@ -78,7 +80,7 @@ class Preset:
             sound_enhancer_enabled=bool(data.get("sound_enhancer_enabled", False)),
             audio_stability=_normalize_audio_stability(str(data.get("audio_stability") or DEFAULT_AUDIO_STABILITY)),
             sample_rate_mode=normalize_sample_rate_mode(data.get("sample_rate_mode", DEFAULT_SAMPLE_RATE_MODE)),
-            output_keywords=[str(item).lower() for item in data.get("output_keywords", [])],
+            output_keywords=_normalize_output_keywords(data.get("output_keywords", [])),
             lr_swap_enabled=bool(data.get("lr_swap_enabled", False)),
             global_peq_enabled=bool(data.get("global_peq_enabled", False)),
             global_peq_text=str(data.get("global_peq_text") or ""),
@@ -121,11 +123,19 @@ class Preset:
 
 
 def load_presets(settings: dict[str, object], devices: list[AudioDevice]) -> list[Preset]:
-    if int(settings.get("preset_schema_version", 0) or 0) not in SUPPORTED_PRESET_SCHEMA_VERSIONS:
+    if _safe_int(settings.get("preset_schema_version", 0), 0) not in SUPPORTED_PRESET_SCHEMA_VERSIONS:
         return []
     raw_presets = settings.get("presets")
     if isinstance(raw_presets, list) and raw_presets:
-        return [Preset.from_dict(item) for item in raw_presets if isinstance(item, dict)]
+        presets: list[Preset] = []
+        for item in raw_presets:
+            if not isinstance(item, dict):
+                continue
+            try:
+                presets.append(Preset.from_dict(item))
+            except Exception:
+                continue
+        return presets
     return []
 
 
@@ -279,6 +289,37 @@ def _identity(device: AudioDevice | None, mode: str) -> dict[str, object] | None
 def _normalize_audio_stability(value: str) -> str:
     normalized = _AUDIO_STABILITY_ALIASES.get(value, value)
     return normalized if normalized in _AUDIO_STABILITY_VALUES else DEFAULT_AUDIO_STABILITY
+
+
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _safe_float(value: object, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _normalize_preamp_db(value: object) -> int:
+    parsed = _safe_int(value, DEFAULT_PREAMP_DB)
+    return max(PREAMP_MIN_DB, min(PREAMP_MAX_DB, parsed))
+
+
+def _normalize_user_volume(value: object) -> float:
+    parsed = _safe_float(value, 1.0)
+    return max(0.0, min(1.0, parsed))
+
+
+def _normalize_output_keywords(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).lower() for item in value if str(item).strip()]
 
 
 def _normalize_trim_db(value: object) -> float:

@@ -155,6 +155,42 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(loaded[0].trim_left_db, 0.0)
         self.assertEqual(loaded[0].trim_right_db, 0.0)
 
+    def test_malformed_saved_preset_values_do_not_crash_launch(self) -> None:
+        loaded = load_presets(
+            {
+                "preset_schema_version": "3",
+                "presets": [
+                    {
+                        "id": "recoverable",
+                        "name": "Recoverable",
+                        "preamp_db": "not-a-number",
+                        "user_volume": "nan",
+                        "output_keywords": "qudelix",
+                        "trim_left_db": "bad",
+                    },
+                    object(),
+                ],
+            },
+            [fake_input(), fake_output()],
+        )
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].preamp_db, -14)
+        self.assertEqual(loaded[0].user_volume, 1.0)
+        self.assertEqual(loaded[0].output_keywords, [])
+        self.assertEqual(loaded[0].trim_left_db, 0.0)
+
+    def test_malformed_preset_schema_version_is_ignored(self) -> None:
+        loaded = load_presets(
+            {
+                "preset_schema_version": "bad",
+                "presets": [{"id": "p1", "name": "Preset"}],
+            },
+            [fake_input(), fake_output()],
+        )
+
+        self.assertEqual(loaded, [])
+
     def test_sound_enhancer_state_is_serialized(self) -> None:
         preset = preset_from_current(
             "Laptop",

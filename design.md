@@ -1,6 +1,6 @@
 # Downmix Renderer Design System
 
-Last updated: 2026-06-15
+Last updated: 2026-06-21
 
 ## Design Intent
 
@@ -20,7 +20,7 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - The first screen is the actual renderer, not a landing page.
 - The route lane owns routing actions: fixed `CABLE Input`, output device, compact sample rate, and a refresh icon.
 - Keep output/session controls close to renderer state, not hidden in debug tooling.
-- Main renderer columns remain stable at launch size and high DPI; fixed-format controls use explicit heights and minimum widths to avoid layout jumps.
+- Main renderer columns remain stable at launch size and high DPI; Qt high-DPI scaling is configured before app creation, and fixed-format controls use explicit heights and minimum widths to avoid layout jumps.
 - The Presets tab keeps profile management and PEQ/correction controls together because those values are saved as one profile surface.
 - Diagnostic text can wrap, but controls should not resize due to changing meter/status text.
 
@@ -31,6 +31,8 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Room visualizer: faster while idle, relaxed while rendering to reduce GPU/DWM contention.
 - PEQ parsing is debounced and never runs directly from audio callbacks.
 - Animations are short, non-blocking Qt animations. Avoid heavy effects, blurs, particle systems, or continuous repaints outside the existing clipped regions.
+- The measured steady-state UI loop is far below the 40 ms timer budget. Do not add always-on work to `update_ui()` unless it has before/after measurements and visible user benefit.
+- Use Qt `update()`/timer-driven repaint scheduling rather than `repaint()` or blocking waits, so Qt can coalesce paint events and keep interactions fluid.
 
 ## Component Rules
 
@@ -55,7 +57,10 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Do not change matrix coefficients, LFE delay behavior, limiter behavior, PEQ math, channel trim semantics, or native/Python DSP parity unless fixing a verified audio bug.
 - Loudness enhancement must stay optional, post-mix, bounded by safety limiting, and mirrored between Python and native DSP.
 - UI polish must not add dependencies or move work onto the audio callback path.
-- Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows. Automatic restart paths must respect the user stop state and the current Windows default output; direct speaker output pauses/releases the renderer instead of restarting it. After any stream start, callback/frame liveness must be proven quickly, with stale checks ignored by generation.
+- Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows. Automatic restart paths must respect the user stop state and the endpoint-aware current Windows default output identity.
+- Output-device switching is considered production-complete for both Apple Music Lossless and Dolby Atmos. Preserve the direct-output handoff state machine: active VB-CABLE input after a Windows output change retargets the renderer bridge to the new direct endpoint; sustained VB-CABLE silence pauses/releases the renderer path; returning to VB-CABLE resumes after a short settle delay.
+- Do not replace the switching solution with media-player play/pause automation, unconditional stream restarts, or track-change assumptions. Any future change must include failing regression coverage for the old behavior and manual validation on both Lossless and Dolby Atmos tracks.
+- After any stream start, callback/frame liveness must be proven quickly, with stale checks ignored by generation.
 
 ## Documentation And Testing Expectations
 

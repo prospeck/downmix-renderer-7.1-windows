@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,8 +36,9 @@ from downmix_renderer.app import (
     apply_windows_window_icons,
     build_details_body,
     clamp_trim_db,
+    configure_qt_scaling,
 )
-from downmix_renderer.constants import APP_DISPLAY_NAME
+from downmix_renderer.constants import APP_DISPLAY_NAME, CHANNEL_LAYOUTS
 from downmix_renderer.devices import AudioDevice
 from downmix_renderer.presets import preset_from_current
 
@@ -116,6 +118,23 @@ def fake_named_output(device_id: int, name: str) -> AudioDevice:
     )
 
 
+def fake_endpoint_output(device_id: int, name: str, endpoint_id: str) -> AudioDevice:
+    return AudioDevice(
+        id=device_id,
+        name=name,
+        hostapi="Windows WASAPI",
+        max_input_channels=0,
+        max_output_channels=2,
+        default_samplerate=48000,
+        default_low_input_latency=0.0,
+        default_low_output_latency=0.003,
+        default_high_input_latency=0.0,
+        default_high_output_latency=0.010,
+        native_endpoint_id=endpoint_id,
+        native_direction="output",
+    )
+
+
 def with_samplerate(device: AudioDevice, samplerate: int) -> AudioDevice:
     return AudioDevice(
         id=device.id,
@@ -146,6 +165,7 @@ class AppUiTests(unittest.TestCase):
         saved_settings: list[dict[str, object]] | None = None,
         devices: list[AudioDevice] | None = None,
         default_output: AudioDevice | None = None,
+        list_devices_side_effect: object | None = None,
     ) -> RendererWindow:
         available_devices = devices or [fake_input(), fake_output()]
         default_output = default_output or next(
@@ -158,7 +178,9 @@ class AppUiTests(unittest.TestCase):
 
         patchers = [
             patch.dict(os.environ, {"DOWNMIX_RENDERER_AUDIO_BACKEND": "python"}, clear=False),
-            patch("downmix_renderer.app.list_devices", return_value=available_devices),
+            patch("downmix_renderer.app.list_devices", side_effect=list_devices_side_effect)
+            if list_devices_side_effect is not None
+            else patch("downmix_renderer.app.list_devices", return_value=available_devices),
             patch("downmix_renderer.app.default_wasapi_output", return_value=default_output),
             patch("downmix_renderer.app.load_settings", return_value=settings or {}),
             patch("downmix_renderer.app.save_settings", save_capture),
@@ -195,6 +217,62 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(layout.columnStretch(1), 1)
         self.assertEqual(layout.columnStretch(2), 0)
 
+    def test_launch_survives_initial_device_enumeration_failure(self) -> None:
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            list_devices_side_effect=RuntimeError("device api unavailable"),
+        )
+
+        self.assertEqual(window.all_devices, [])
+        self.assertEqual(window.devices, [])
+        self.assertEqual(window.input_combo.count(), 0)
+        self.assertEqual(window.output_combo.count(), 0)
+        self.assertEqual(window._status_state, "warning")
+        self.assertIn("Device scan failed", window._status_text)
+
+    def test_auto_start_waits_for_route_after_initial_device_scan_failure(self) -> None:
+        cable_output = fake_cable_playback_output()
+        fresh_devices = [fake_input(), cable_output]
+        window = self.make_window(
+            {
+                "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                "was_running": True,
+            },
+            default_output=cable_output,
+            list_devices_side_effect=RuntimeError("device api unavailable"),
+        )
+        starts: list[bool] = []
+        window.start_audio = lambda: starts.append(True)
+
+        window._auto_start_if_needed()
+        self.assertEqual(starts, [])
+        self.assertTrue(window._force_auto_start)
+
+        window._apply_device_poll_result(fresh_devices, was_running=False)
+
+        self.assertEqual(starts, [True])
+
+    def test_close_waits_for_active_device_inventory_worker(self) -> None:
+        window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
+        window._closing_with_animation = True
+        thread = QtCore.QThread(window)
+        window._device_poll_thread = thread
+        thread.start()
+        def stop_thread() -> None:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(1000)
+
+        self.addCleanup(stop_thread)
+        event = QtGui.QCloseEvent()
+
+        window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        thread.quit()
+        self.assertTrue(thread.wait(1000))
+        window._device_poll_thread = None
+
     def test_spatial_page_draws_live_finalised_v3_backdrop_layer(self) -> None:
         window = self.make_window()
         page = window.findChild(QtWidgets.QWidget, "mainPage")
@@ -211,23 +289,23 @@ class AppUiTests(unittest.TestCase):
         self.assertTrue(call.kwargs["cinematic_depth"])
         self.assertIsInstance(call.kwargs["cursor"], QtCore.QPoint)
 
-    def test_visual_motion_keeps_production_backdrop_cadence_while_rendering(self) -> None:
+    def test_visual_motion_throttles_backdrop_cadence_while_rendering(self) -> None:
         window = self.make_window()
 
         sync_visual_performance = getattr(window, "_sync_visual_performance", None)
         self.assertIsNotNone(sync_visual_performance)
 
-        self.assertEqual(window.backdrop_timer.interval(), 70)
+        self.assertEqual(window.backdrop_timer.interval(), window.IDLE_BACKDROP_INTERVAL_MS)
         self.assertLess(window.room_visualizer.animation_timer.interval(), window.AUDIO_SAFE_ROOM_INTERVAL_MS)
 
         sync_visual_performance(rendering=True)
 
-        self.assertEqual(window.backdrop_timer.interval(), 70)
+        self.assertEqual(window.backdrop_timer.interval(), window.AUDIO_SAFE_BACKDROP_INTERVAL_MS)
         self.assertEqual(window.room_visualizer.animation_timer.interval(), window.AUDIO_SAFE_ROOM_INTERVAL_MS)
 
         sync_visual_performance(rendering=False)
 
-        self.assertEqual(window.backdrop_timer.interval(), 70)
+        self.assertEqual(window.backdrop_timer.interval(), window.IDLE_BACKDROP_INTERVAL_MS)
         self.assertEqual(window.room_visualizer.animation_timer.interval(), window.IDLE_ROOM_INTERVAL_MS)
 
     def test_backdrop_phase_advance_matches_finalised_v3(self) -> None:
@@ -498,32 +576,52 @@ class AppUiTests(unittest.TestCase):
 
         self.assertEqual(button.__class__.__name__, "RouteRefreshButton")
         self.assertTrue(getattr(button, "has_premium_refresh_animation", False))
-        self.assertGreaterEqual(getattr(button, "refresh_icon_stroke_width", 0.0), 2.2)
-        self.assertGreaterEqual(getattr(button, "refresh_icon_gap_degrees", 0), 76)
-        self.assertGreaterEqual(getattr(button, "refresh_icon_arrow_size", 0.0), 5.8)
-        self.assertEqual(getattr(button, "refresh_arrow_direction", ""), "clockwise_upper_right")
-        self.assertEqual(getattr(button, "refresh_arrow_head_style", ""), "line_chevron")
-        self.assertGreaterEqual(getattr(button, "refresh_arrow_tip_angle_degrees", 0), 28)
-        self.assertLessEqual(getattr(button, "refresh_arrow_tip_angle_degrees", 99), 40)
-        self.assertLess(getattr(button, "refresh_arrow_tip_y_ratio", 1.0), 0.0)
-        self.assertLessEqual(getattr(button, "refresh_icon_radius", 99.0), 7.0)
-        self.assertGreaterEqual(getattr(button, "refresh_icon_arc_sweep_degrees", 0.0), 276.0)
+        self.assertEqual(getattr(button, "refresh_icon_style", ""), "css_spinner_fade9234")
+        self.assertTrue(getattr(button, "uses_css_spinner_fade9234", False))
+        self.assertFalse(getattr(button, "uses_chatgpt_style_spinner", True))
+        self.assertEqual(getattr(button, "refresh_spinner_spoke_count", 0), 12)
+        self.assertEqual(getattr(button, "refresh_spinner_blade_degrees", 0), 30)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_blade_delay", 0.0), 0.083, places=3)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_em_px", 0.0), 20.0, places=1)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_static_em_px", 0.0), 16.0, places=1)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_blade_left_em", 0.0), 0.4629, places=4)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_blade_width_em", 0.0), 0.074, places=3)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_blade_height_em", 0.0), 0.2777, places=4)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_blade_radius_em", 0.0), 0.0555, places=4)
+        self.assertAlmostEqual(getattr(button, "refresh_spinner_transform_origin_y_em", 0.0), -0.2222, places=4)
         self.assertEqual(getattr(button, "refresh_spin_degrees", 0), 360)
         self.assertFalse(getattr(button, "uses_refresh_pulse", True))
         self.assertTrue(getattr(button, "uses_refresh_animation_group", False))
         self.assertTrue(getattr(button, "refresh_press_feedback_enabled", False))
         self.assertTrue(getattr(button, "uses_refresh_wheel_morph", False))
-        self.assertEqual(getattr(button, "refresh_wheel_morph_peak", 0.0), 0.5)
-        self.assertGreaterEqual(getattr(button, "refresh_wheel_hold_start", 1.0), 0.30)
-        self.assertLessEqual(getattr(button, "refresh_wheel_hold_end", 0.0), 0.70)
-        self.assertEqual(getattr(button, "refresh_wheel_accent_color", ""), "#45d88f")
-        self.assertTrue(getattr(button, "refresh_wheel_tint_follows_morph", False))
-        self.assertEqual(getattr(button, "refresh_easing_curve_name", ""), "OutCubic")
-        self.assertGreaterEqual(getattr(button, "SPINNER_MINIMUM_VISIBLE_MS", 0), 480)
-        self.assertLessEqual(getattr(button, "SPINNER_MINIMUM_VISIBLE_MS", 999), 580)
-        self.assertGreaterEqual(getattr(button, "SPINNER_SETTLE_FADE_MS", 0), 120)
-        self.assertLessEqual(getattr(button, "SPINNER_SETTLE_FADE_MS", 999), 200)
+        self.assertEqual(getattr(button, "refresh_wheel_morph_peak", 0.0), 1.0)
+        self.assertEqual(getattr(button, "refresh_wheel_hold_start", -1.0), 0.0)
+        self.assertEqual(getattr(button, "refresh_wheel_hold_end", 0.0), 1.0)
+        self.assertEqual(getattr(button, "refresh_wheel_accent_color", ""), "#d8dcde")
+        self.assertEqual(getattr(button, "refresh_spinner_base_color", ""), "#d8dcde")
+        self.assertFalse(getattr(button, "refresh_wheel_tint_follows_morph", True))
+        self.assertEqual(getattr(button, "refresh_easing_curve_name", ""), "Linear")
+        self.assertEqual(getattr(button, "SPINNER_MINIMUM_VISIBLE_MS", 0), 720)
+        self.assertEqual(getattr(button, "SPINNER_SETTLE_FADE_MS", -1), 0)
         self.assertEqual(getattr(button, "REFRESH_ANIMATION_MS", 0), getattr(button, "SPINNER_MINIMUM_VISIBLE_MS", -1))
+        self.assertEqual(button._refresh_animation.duration(), 720)
+        self.assertEqual(button._refresh_animation.easingCurve().type(), QtCore.QEasingCurve.Linear)
+        self.assertEqual(button._refresh_press_animation.duration(), 88)
+
+        button.resize(48, 44)
+        for progress in (0.0, 0.5):
+            button.refreshProgress = progress
+            pixmap = QtGui.QPixmap(button.size())
+            pixmap.fill(QtCore.Qt.transparent)
+            button.render(pixmap)
+            image = pixmap.toImage()
+            spinner_pixels = 0
+            for y in range(4, 40):
+                for x in range(8, 40):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.alpha() and pixel.red() >= 50 and pixel.green() >= 50 and pixel.blue() >= 50:
+                        spinner_pixels += 1
+            self.assertGreater(spinner_pixels, 20)
 
         button.animate_refresh()
         self.app.processEvents()
@@ -532,12 +630,12 @@ class AppUiTests(unittest.TestCase):
         self.assertGreater(button.refresh_press_depth, 0.0)
         button.refreshProgress = 0.5
         self.assertGreater(button.refresh_wheel_morph, 0.95)
-        self.assertEqual(button.refresh_glyph_color().name(), "#45d88f")
+        self.assertEqual(button.refresh_glyph_color().name(), "#d8dcde")
         button.refreshProgress = 0.66
         self.assertGreater(button.refresh_wheel_morph, 0.95)
         button.refreshProgress = 1.0
         self.assertLess(button.refresh_wheel_morph, 0.05)
-        self.assertEqual(button.refresh_glyph_color().name(), "#f0f4f3")
+        self.assertEqual(button.refresh_glyph_color().name(), "#d8dcde")
         self.assertEqual(button.text(), "")
         self.assertFalse(button.icon().isNull())
         button.cancel_refresh_animation()
@@ -546,11 +644,56 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(button.refresh_press_depth, 0.0)
         self.assertEqual(button.refreshSettleAlpha, 0.0)
 
-    def test_level_meter_ballistics_use_fast_attack_and_smooth_decay(self) -> None:
+    def test_level_meters_keep_exact_values_with_smooth_visual_ballistics(self) -> None:
         for meter_class in (VUMeter, StereoSumMeter, ChannelTile, RawChannelTile):
+            self.assertFalse(getattr(meter_class, "USES_INSTANT_METERING", True))
             self.assertGreater(getattr(meter_class, "METER_ATTACK"), getattr(meter_class, "METER_DECAY"))
-            self.assertGreaterEqual(getattr(meter_class, "METER_ATTACK"), 0.50)
-            self.assertLessEqual(getattr(meter_class, "METER_DECAY"), 0.12)
+            self.assertLess(getattr(meter_class, "METER_ATTACK"), 1.0)
+            self.assertLess(getattr(meter_class, "METER_DECAY"), 0.2)
+
+        vu = VUMeter("L")
+        channel = ChannelTile("FL", 0)
+        raw = RawChannelTile("FL", 0)
+        stereo = StereoSumMeter()
+        room = RoomVisualizer()
+        for widget in (vu, channel, raw, stereo, room):
+            self.addCleanup(widget.deleteLater)
+
+        vu.set_level(0.25)
+        channel.set_level(0.125)
+        raw.set_levels(0.375, 0.125)
+        stereo.set_levels(0.5, 0.75)
+        room.set_levels([0.0002] + [0.0] * 15)
+
+        self.assertEqual(vu.level, 0.25)
+        self.assertLess(vu.display_level, vu.level)
+        self.assertEqual(channel.level, 0.125)
+        self.assertLess(channel.display_level, channel.level)
+        self.assertEqual(raw.peak, 0.375)
+        self.assertLess(raw.display_peak, raw.peak)
+        self.assertEqual(raw.rms, 0.125)
+        self.assertEqual(stereo.left_level, 0.5)
+        self.assertEqual(stereo.right_level, 0.75)
+        self.assertLess(stereo.left_display, stereo.left_level)
+        self.assertLess(stereo.right_display, stereo.right_level)
+        self.assertEqual(room.levels[0], 0.0002)
+        self.assertLess(room.display_levels[0], room.levels[0])
+        self.assertEqual(room.active_speaker_count, 1)
+        self.assertEqual(RoomVisualizer.ACTIVE_THRESHOLD, 0.0001)
+
+        channel.set_level(0.0)
+        raw.set_levels(0.0, 0.0)
+        stereo.set_levels(0.0, 0.0)
+        room.set_levels([0.0] * 16)
+
+        self.assertEqual(channel.level, 0.0)
+        self.assertGreater(channel.display_level, 0.0)
+        self.assertEqual(raw.peak, 0.0)
+        self.assertGreater(raw.display_peak, 0.0)
+        self.assertEqual(stereo.left_level, 0.0)
+        self.assertGreater(stereo.left_display, 0.0)
+        self.assertEqual(room.levels[0], 0.0)
+        self.assertGreater(room.display_levels[0], 0.0)
 
     def test_route_dropdown_popups_use_themed_route_views(self) -> None:
         window = self.make_window()
@@ -1153,25 +1296,25 @@ class AppUiTests(unittest.TestCase):
         windows = {label: (source_index, x, y, z) for source_index, label, x, y, z in RoomVisualizer._speakers_for_config("windows_7_1")}
         self.assertEqual(windows["LFE"][0], 3)
         self.assertAlmostEqual(windows["LFE"][1], 0.50)
-        self.assertEqual(windows["RL"][0], 4)
-        self.assertEqual(windows["RR"][0], 5)
+        self.assertEqual(windows["BL"][0], 4)
+        self.assertEqual(windows["BR"][0], 5)
         self.assertEqual(windows["SL"][0], 6)
         self.assertEqual(windows["SR"][0], 7)
-        self.assertLess(windows["SL"][2], windows["RL"][2])
-        self.assertLess(windows["SR"][2], windows["RR"][2])
+        self.assertLess(windows["SL"][2], windows["BL"][2])
+        self.assertLess(windows["SR"][2], windows["BR"][2])
 
         sharur = {label: (source_index, x, y, z) for source_index, label, x, y, z in RoomVisualizer._speakers_for_config("sharur_9_1_6")}
-        self.assertEqual(sharur["Lw"][0], 4)
-        self.assertEqual(sharur["Rw"][0], 5)
-        self.assertEqual(sharur["Lrs"][0], 6)
-        self.assertEqual(sharur["Rrs"][0], 7)
-        self.assertEqual(sharur["Ls"][0], 8)
-        self.assertEqual(sharur["Rs"][0], 9)
-        self.assertEqual(sharur["Ltf"][0], 10)
-        self.assertEqual(sharur["Ltm"][0], 12)
-        self.assertEqual(sharur["Ltr"][0], 14)
-        self.assertLess(sharur["Lw"][2], sharur["Ls"][2])
-        self.assertLess(sharur["Ls"][2], sharur["Lrs"][2])
+        self.assertEqual(sharur["BL"][0], 4)
+        self.assertEqual(sharur["BR"][0], 5)
+        self.assertEqual(sharur["BLC"][0], 6)
+        self.assertEqual(sharur["BRC"][0], 7)
+        self.assertEqual(sharur["SL"][0], 8)
+        self.assertEqual(sharur["SR"][0], 9)
+        self.assertEqual(sharur["TFL"][0], 10)
+        self.assertEqual(sharur["TSL"][0], 12)
+        self.assertEqual(sharur["TBL"][0], 14)
+        self.assertLess(sharur["BL"][2], sharur["SL"][2])
+        self.assertLess(sharur["SL"][2], sharur["BLC"][2])
 
     def test_channel_field_mode_buttons_rebuild_tiles_and_visualizer(self) -> None:
         window = self.make_window()
@@ -1311,6 +1454,47 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(windows_mapping["SL"], 6)
         self.assertEqual(windows_mapping["SR"], 7)
 
+    def test_channel_field_room_dots_and_raw_monitor_light_matching_named_channels(self) -> None:
+        window = self.make_window()
+        dialog = RawMonitorDialog(None)
+        self.addCleanup(dialog.deleteLater)
+        window.raw_monitor_dialog = dialog
+
+        for config_id in ("windows_7_1", "sharur_9_1_6"):
+            window.set_channel_config(config_id)
+            dialog.set_channel_config(config_id)
+            layout = CHANNEL_LAYOUTS[config_id]
+            expected = list(zip(layout["names"], layout["indices"]))
+            field_mapping = [(tile.name, tile.source_index) for tile in window.tiles]
+            raw_mapping = [(tile.name, tile.source_index) for tile in dialog.tiles]
+            room_mapping = [(label, source_index) for source_index, label, *_ in window.room_visualizer.current_speakers]
+
+            self.assertEqual(field_mapping, expected)
+            self.assertEqual(raw_mapping, expected)
+            self.assertEqual(sorted(room_mapping, key=lambda item: item[1]), sorted(expected, key=lambda item: item[1]))
+
+            for name, source_index in expected:
+                levels = [0.0] * 16
+                rms_values = [0.0] * 16
+                levels[source_index] = 0.5
+                rms_values[source_index] = 0.25
+                window.room_visualizer.set_levels(levels)
+                for tile in window.tiles:
+                    tile.set_level(levels[tile.source_index])
+                dialog.set_levels(levels, rms_values)
+
+                lit_field = [tile.name for tile in window.tiles if tile.level > RoomVisualizer.ACTIVE_THRESHOLD]
+                lit_raw = [tile.name for tile in dialog.tiles if tile.peak > RoomVisualizer.ACTIVE_THRESHOLD]
+                lit_room = [
+                    label
+                    for source_index_candidate, label, *_ in window.room_visualizer.current_speakers
+                    if window.room_visualizer._speaker_exact_level(source_index_candidate) > RoomVisualizer.ACTIVE_THRESHOLD
+                ]
+
+                self.assertEqual(lit_field, [name])
+                self.assertEqual(lit_raw, [name])
+                self.assertEqual(lit_room, [name])
+
     def test_raw_monitor_lights_processed_upmix_channels_like_channel_field(self) -> None:
         window = self.make_window()
         window.set_channel_config("sharur_9_1_6")
@@ -1366,6 +1550,78 @@ class AppUiTests(unittest.TestCase):
         self.assertGreater(field_tile.display_level, 0.0)
         self.assertGreater(raw_tile.display_peak, 0.0)
         self.assertEqual(raw_tile.peak, processed_levels[10])
+
+    def test_update_ui_preserves_exact_meter_values_with_smoothed_display(self) -> None:
+        window = self.make_window()
+        dialog = RawMonitorDialog(None)
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        self.addCleanup(dialog.hide)
+        window.raw_monitor_dialog = dialog
+
+        levels = [0.0] * 16
+        rms_values = [0.0] * 16
+        levels[0] = 0.0002
+        levels[1] = 0.375
+        rms_values[1] = 0.125
+        dsp = SimpleNamespace(
+            channel_levels=levels,
+            channel_rms=rms_values,
+            raw_channel_levels=[0.0] * 16,
+            raw_channel_rms=[0.0] * 16,
+            left_meter=0.625,
+            right_meter=0.25,
+            limiter_gain=1.0,
+            clipping=False,
+            sound_enhancer_enabled=False,
+            sound_enhancer_gain=1.0,
+            surround_fill_enabled=False,
+            surround_fill_active=False,
+            upmix_9_1_6_enabled=False,
+            upmix_9_1_6_active=False,
+        )
+        snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            route="Test route",
+            input_channels=16,
+            stream_latency=None,
+            stream_profile="ultra",
+            sample_rate=48000,
+            sample_rate_mode="auto",
+            callback_status_count=0,
+            callback_status="",
+            dsp_error_count=0,
+            cpu_load=0.0,
+            dsp=dsp,
+        )
+        volume = SimpleNamespace(muted=False, scalar=1.0, available=True, source="endpoint")
+        window.engine.snapshot = lambda: snapshot
+        window.engine.poll_volume = lambda: volume
+
+        window.update_ui()
+
+        field_tile = next(tile for tile in window.tiles if tile.source_index == 1)
+        low_tile = next(tile for tile in window.tiles if tile.source_index == 0)
+        raw_tile = next(tile for tile in dialog.tiles if tile.source_index == 1)
+        self.assertEqual(field_tile.level, 0.375)
+        self.assertGreater(field_tile.display_level, 0.0)
+        self.assertLess(field_tile.display_level, field_tile.level)
+        self.assertEqual(low_tile.level, 0.0002)
+        self.assertGreater(low_tile.display_level, 0.0)
+        self.assertLess(low_tile.display_level, low_tile.level)
+        self.assertEqual(window.room_visualizer.levels[0], 0.0002)
+        self.assertLess(window.room_visualizer.display_levels[0], window.room_visualizer.levels[0])
+        self.assertEqual(window.room_visualizer.active_speaker_count, 2)
+        self.assertEqual(raw_tile.peak, 0.375)
+        self.assertEqual(raw_tile.rms, 0.125)
+        self.assertGreater(raw_tile.display_peak, 0.0)
+        self.assertLess(raw_tile.display_peak, raw_tile.peak)
+        self.assertEqual(window.stereo_sum_meter.left_level, 0.625)
+        self.assertLess(window.stereo_sum_meter.left_display, window.stereo_sum_meter.left_level)
+        self.assertEqual(window.stereo_sum_meter.right_level, 0.25)
+        self.assertLess(window.stereo_sum_meter.right_display, window.stereo_sum_meter.right_level)
+        self.assertIn("FL", window.diag_labels["Active"].text())
 
     def test_opened_raw_monitor_is_not_owned_by_main_window(self) -> None:
         window = self.make_window()
@@ -1574,6 +1830,73 @@ class AppUiTests(unittest.TestCase):
         self.assertTrue(any("Qudelix" in text for text in outputs))
         self.assertEqual(window.output_combo.currentData(), original.id)
 
+    def test_refresh_button_click_reenumerates_devices_without_blocking_ui_thread(self) -> None:
+        window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
+        original = fake_output()
+        fresh_devices = [fake_input(), original, fake_usb_output()]
+        calls: list[bool] = []
+
+        def fake_list_devices(force_refresh: bool = False) -> list[AudioDevice]:
+            calls.append(force_refresh)
+            time.sleep(0.08)
+            return fresh_devices
+
+        with patch("downmix_renderer.app.list_devices", fake_list_devices):
+            window.refresh_devices_button.click()
+            self.assertIsNotNone(window._device_refresh_thread)
+
+            progress_deadline = time.monotonic() + 0.3
+            while window.refresh_devices_button.refresh_progress <= 0.0 and time.monotonic() < progress_deadline:
+                self.app.processEvents()
+                QtCore.QThread.msleep(5)
+            self.assertGreater(window.refresh_devices_button.refresh_progress, 0.0)
+
+            refresh_deadline = time.monotonic() + 2.0
+            while window._device_refresh_thread is not None and time.monotonic() < refresh_deadline:
+                self.app.processEvents()
+                QtCore.QThread.msleep(10)
+            self.assertIsNone(window._device_refresh_thread)
+
+        outputs = [window.output_combo.itemText(row) for row in range(window.output_combo.count())]
+        self.assertEqual(calls, [True])
+        self.assertTrue(any("Qudelix" in text for text in outputs))
+        self.assertEqual(window.output_combo.currentData(), original.id)
+
+    def test_device_timer_poll_reenumerates_without_blocking_ui_thread(self) -> None:
+        window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
+        original = fake_output()
+        fresh_devices = [fake_input(), original, fake_usb_output()]
+        calls: list[bool] = []
+        window._device_poll_count = DEVICE_FORCE_REFRESH_INTERVAL - 1
+
+        def fake_list_devices(force_refresh: bool = False) -> list[AudioDevice]:
+            calls.append(force_refresh)
+            time.sleep(0.08)
+            return fresh_devices
+
+        with patch("downmix_renderer.app.list_devices", fake_list_devices):
+            window._poll_devices_from_timer()
+            self.assertIsNotNone(window._device_poll_thread)
+
+            processed_events = False
+            progress_deadline = time.monotonic() + 0.3
+            while window._device_poll_thread is not None and time.monotonic() < progress_deadline:
+                processed_events = True
+                self.app.processEvents()
+                QtCore.QThread.msleep(10)
+            self.assertTrue(processed_events)
+
+            refresh_deadline = time.monotonic() + 2.0
+            while window._device_poll_thread is not None and time.monotonic() < refresh_deadline:
+                self.app.processEvents()
+                QtCore.QThread.msleep(10)
+            self.assertIsNone(window._device_poll_thread)
+
+        outputs = [window.output_combo.itemText(row) for row in range(window.output_combo.count())]
+        self.assertEqual(calls, [True])
+        self.assertTrue(any("Qudelix" in text for text in outputs))
+        self.assertEqual(window.output_combo.currentData(), original.id)
+
     def test_forced_device_refresh_is_requested_periodically(self) -> None:
         window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
         calls: list[bool] = []
@@ -1616,7 +1939,7 @@ class AppUiTests(unittest.TestCase):
 
         self.assertEqual(restart_rates, [96000])
 
-    def test_windows_direct_output_change_releases_renderer_without_forgetting_resume_intent(self) -> None:
+    def test_windows_direct_output_change_arms_lossless_handoff_without_immediate_stop(self) -> None:
         speakers = fake_output()
         cable_playback = fake_cable_playback_output()
         saved: list[dict[str, object]] = []
@@ -1635,15 +1958,196 @@ class AppUiTests(unittest.TestCase):
 
         window.engine.stop = fake_stop
 
-        handled = window._sync_renderer_with_windows_default_output(speakers, was_running=True)
+        with patch("downmix_renderer.app.monotonic", return_value=10.0):
+            handled = window._sync_renderer_with_windows_default_output(speakers, was_running=True)
 
         self.assertTrue(handled)
+        self.assertEqual(stop_calls, [])
+        self.assertFalse(window._paused_for_direct_output)
+        self.assertIsNotNone(window._direct_output_handoff_generation)
+        self.assertTrue(window._force_auto_start)
+        self.assertEqual(window._status_text, "Direct output handoff")
+        self.assertTrue(saved[-1]["resume_on_launch"])
+        self.assertTrue(saved[-1]["was_running"])
+
+    def test_direct_output_handoff_keeps_bridging_when_lossless_still_feeds_cable(self) -> None:
+        speakers = fake_output()
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), speakers, cable_playback],
+            default_output=cable_playback,
+        )
+        window.engine._running = True
+        stop_calls: list[bool] = []
+
+        def fake_stop(resume_keep_awake: bool = True) -> None:
+            stop_calls.append(resume_keep_awake)
+            window.engine._running = False
+
+        window.engine.stop = fake_stop
+
+        with patch("downmix_renderer.app.monotonic", return_value=20.0):
+            window._sync_renderer_with_windows_default_output(speakers, was_running=True)
+
+        active_cable_snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            callback_status="",
+            callback_status_count=0,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.05] + [0.0] * 15,
+                left_meter=0.05,
+                right_meter=0.05,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with (
+            patch("downmix_renderer.app.default_wasapi_output", return_value=speakers),
+            patch("downmix_renderer.app.monotonic", return_value=22.0),
+        ):
+            self.assertFalse(window._maybe_pause_after_direct_output_handoff(active_cable_snapshot))
+
+        self.assertEqual(stop_calls, [])
+        self.assertIsNotNone(window._direct_output_handoff_generation)
+        self.assertFalse(window._paused_for_direct_output)
+
+    def test_lossless_handoff_retargets_bridge_to_new_windows_output_after_grace(self) -> None:
+        speakers = fake_output()
+        usb = fake_usb_output()
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), speakers, usb, cable_playback],
+            default_output=cable_playback,
+        )
+        window.engine._running = True
+        self.assertEqual(window.output_combo.currentData(), speakers.id)
+        starts: list[tuple[int | None, bool]] = []
+
+        def fake_start_audio(liveness_attempt: int = 0, preserve_direct_output_handoff: bool = False) -> None:
+            starts.append((window.output_combo.currentData(), preserve_direct_output_handoff))
+            window.engine._running = True
+
+        window.start_audio = fake_start_audio
+
+        with patch("downmix_renderer.app.monotonic", return_value=20.0):
+            window._sync_renderer_with_windows_default_output(usb, was_running=True)
+
+        active_cable_snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            callback_status="",
+            callback_status_count=0,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.05] + [0.0] * 15,
+                left_meter=0.05,
+                right_meter=0.05,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with (
+            patch("downmix_renderer.app.default_wasapi_output", return_value=usb),
+            patch("downmix_renderer.app.monotonic", return_value=20.16),
+        ):
+            self.assertTrue(window._maybe_pause_after_direct_output_handoff(active_cable_snapshot))
+
+        self.assertEqual(window.output_combo.currentData(), usb.id)
+        self.assertEqual(starts, [(usb.id, True)])
+        self.assertIsNotNone(window._direct_output_handoff_generation)
+        self.assertIsNone(window._manual_override_default_id)
+
+    def test_lossless_handoff_does_not_retarget_bridge_before_grace(self) -> None:
+        speakers = fake_output()
+        usb = fake_usb_output()
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), speakers, usb, cable_playback],
+            default_output=cable_playback,
+        )
+        window.engine._running = True
+        starts: list[str] = []
+        window.start_audio = lambda liveness_attempt=0: starts.append("start")
+
+        with patch("downmix_renderer.app.monotonic", return_value=30.0):
+            window._sync_renderer_with_windows_default_output(usb, was_running=True)
+
+        active_cable_snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            callback_status="",
+            callback_status_count=0,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.05] + [0.0] * 15,
+                left_meter=0.05,
+                right_meter=0.05,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with (
+            patch("downmix_renderer.app.default_wasapi_output", return_value=usb),
+            patch("downmix_renderer.app.monotonic", return_value=30.04),
+        ):
+            self.assertFalse(window._maybe_pause_after_direct_output_handoff(active_cable_snapshot))
+
+        self.assertEqual(window.output_combo.currentData(), speakers.id)
+        self.assertEqual(starts, [])
+
+    def test_direct_output_handoff_pauses_when_cable_goes_silent(self) -> None:
+        speakers = fake_output()
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), speakers, cable_playback],
+            default_output=cable_playback,
+        )
+        window.engine._running = True
+        stop_calls: list[bool] = []
+
+        def fake_stop(resume_keep_awake: bool = True) -> None:
+            stop_calls.append(resume_keep_awake)
+            window.engine._running = False
+
+        window.engine.stop = fake_stop
+
+        with patch("downmix_renderer.app.monotonic", return_value=30.0):
+            window._sync_renderer_with_windows_default_output(speakers, was_running=True)
+
+        silent_cable_snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            callback_status="",
+            callback_status_count=0,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with (
+            patch("downmix_renderer.app.default_wasapi_output", return_value=speakers),
+            patch("downmix_renderer.app.monotonic", side_effect=[30.1, 30.7]),
+        ):
+            self.assertFalse(window._maybe_pause_after_direct_output_handoff(silent_cable_snapshot))
+            self.assertTrue(window._maybe_pause_after_direct_output_handoff(silent_cable_snapshot))
+
         self.assertEqual(stop_calls, [False])
         self.assertTrue(window._paused_for_direct_output)
-        self.assertTrue(window._force_auto_start)
-        self.assertEqual(window._status_text, "Paused for direct output")
-        self.assertTrue(saved[-1]["resume_on_launch"])
-        self.assertFalse(saved[-1]["was_running"])
+        self.assertIsNone(window._direct_output_handoff_generation)
 
     def test_windows_cable_output_change_resumes_renderer_after_auto_pause(self) -> None:
         cable_playback = fake_cable_playback_output()
@@ -1655,14 +2159,84 @@ class AppUiTests(unittest.TestCase):
         window._paused_for_direct_output = True
         window._force_auto_start = True
         starts: list[str] = []
+        scheduled: list[tuple[int, object]] = []
 
         window.start_audio = lambda: starts.append("start")
 
-        handled = window._sync_renderer_with_windows_default_output(cable_playback, was_running=False)
+        def capture_resume(delay_ms: int, callback: object) -> None:
+            scheduled.append((delay_ms, callback))
+
+        with patch("downmix_renderer.app.QtCore.QTimer.singleShot", side_effect=capture_resume):
+            handled = window._sync_renderer_with_windows_default_output(cable_playback, was_running=False)
 
         self.assertTrue(handled)
         self.assertFalse(window._paused_for_direct_output)
+        self.assertEqual(starts, [])
+        self.assertEqual(len(scheduled), 1)
+        self.assertGreaterEqual(scheduled[0][0], 60)
+        self.assertLessEqual(scheduled[0][0], 150)
+
+        with patch("downmix_renderer.app.default_wasapi_output", return_value=cable_playback):
+            scheduled[0][1]()
+
         self.assertEqual(starts, ["start"])
+
+    def test_device_poll_does_not_bypass_direct_output_resume_settle_delay(self) -> None:
+        speakers = fake_output()
+        cable_playback = fake_cable_playback_output()
+        devices = [fake_input(), speakers, cable_playback]
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=devices,
+            default_output=cable_playback,
+        )
+        window._paused_for_direct_output = True
+        window._force_auto_start = True
+        starts: list[str] = []
+        scheduled: list[tuple[int, object]] = []
+
+        window.start_audio = lambda: starts.append("start")
+
+        def capture_resume(delay_ms: int, callback: object) -> None:
+            scheduled.append((delay_ms, callback))
+
+        with patch("downmix_renderer.app.QtCore.QTimer.singleShot", side_effect=capture_resume):
+            window._apply_device_poll_result(devices, was_running=False)
+
+        self.assertEqual(starts, [])
+        self.assertEqual(len(scheduled), 1)
+
+    def test_watchdog_does_not_bypass_pending_direct_output_resume_delay(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._audio_start_generation = 9
+        window._pending_direct_output_resume_generation = 9
+        starts: list[str] = []
+        window.start_audio = lambda: starts.append("start")
+        snapshot = SimpleNamespace(
+            running=False,
+            status="Stopped",
+            callback_status="",
+            callback_status_count=0,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=70.0):
+            self.assertFalse(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(starts, [])
 
     def test_repeated_default_output_switches_use_symmetric_pause_resume_path(self) -> None:
         speakers = fake_output()
@@ -1687,14 +2261,43 @@ class AppUiTests(unittest.TestCase):
         window.engine.stop = fake_stop
         window.start_audio = fake_start
 
-        for _ in range(50):
-            self.assertTrue(window._sync_renderer_with_windows_default_output(speakers, was_running=True))
-            self.assertTrue(window._paused_for_direct_output)
-            self.assertTrue(window._sync_renderer_with_windows_default_output(cable_playback, was_running=False))
-            self.assertFalse(window._paused_for_direct_output)
+        scheduled: list[tuple[int, object]] = []
+
+        def capture_resume(delay_ms: int, callback: object) -> None:
+            scheduled.append((delay_ms, callback))
+
+        with patch("downmix_renderer.app.QtCore.QTimer.singleShot", side_effect=capture_resume):
+            for _ in range(50):
+                with patch("downmix_renderer.app.monotonic", return_value=10.0):
+                    self.assertTrue(window._sync_renderer_with_windows_default_output(speakers, was_running=True))
+                silent_cable_snapshot = SimpleNamespace(
+                    running=True,
+                    status="Running",
+                    callback_status="",
+                    callback_status_count=0,
+                    dsp_error_count=0,
+                    dsp=SimpleNamespace(
+                        raw_channel_levels=[0.0] * 16,
+                        left_meter=0.0,
+                        right_meter=0.0,
+                        master_volume=1.0,
+                        master_muted=False,
+                    ),
+                )
+                with (
+                    patch("downmix_renderer.app.default_wasapi_output", return_value=speakers),
+                    patch("downmix_renderer.app.monotonic", side_effect=[10.1, 10.7]),
+                ):
+                    self.assertFalse(window._maybe_pause_after_direct_output_handoff(silent_cable_snapshot))
+                    self.assertTrue(window._maybe_pause_after_direct_output_handoff(silent_cable_snapshot))
+                self.assertTrue(window._paused_for_direct_output)
+                self.assertTrue(window._sync_renderer_with_windows_default_output(cable_playback, was_running=False))
+                self.assertFalse(window._paused_for_direct_output)
+                scheduled[-1][1]()
 
         self.assertEqual(stops, [False] * 50)
         self.assertEqual(starts, [0] * 50)
+        self.assertEqual([delay for delay, _ in scheduled], [120] * 50)
         self.assertTrue(window._force_auto_start)
 
     def test_previous_running_session_waits_when_windows_default_is_direct_speaker_output(self) -> None:
@@ -1991,6 +2594,164 @@ class AppUiTests(unittest.TestCase):
 
         self.assertEqual(restarts, ["restart"])
 
+    def test_stale_device_reroute_notification_does_not_restart_again(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._last_callback_status_count = 4
+        restarts: list[str] = []
+        window.start_audio = lambda: restarts.append("restart")
+        snapshot = SimpleNamespace(
+            running=True,
+            status="Running (C++ ultra)",
+            callback_status="device rerouted",
+            callback_status_count=4,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=48.0):
+            self.assertFalse(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(restarts, [])
+
+    def test_new_device_reroute_notification_restarts_once(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._last_callback_status_count = 4
+        restarts: list[str] = []
+        window.start_audio = lambda: restarts.append("restart")
+        snapshot = SimpleNamespace(
+            running=True,
+            status="Running (C++ ultra)",
+            callback_status="device rerouted",
+            callback_status_count=5,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=48.0):
+            self.assertTrue(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(restarts, ["restart"])
+        self.assertEqual(window._last_callback_status_count, 5)
+
+    def test_new_device_reroute_notification_bypasses_idle_recovery_cooldown(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._last_audio_recovery_at = 40.0
+        window._last_callback_status_count = 7
+        restarts: list[str] = []
+        window.start_audio = lambda: restarts.append("restart")
+        snapshot = SimpleNamespace(
+            running=True,
+            status="Running (C++ ultra)",
+            callback_status="device rerouted",
+            callback_status_count=8,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=40.25):
+            self.assertTrue(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(restarts, ["restart"])
+
+    def test_new_device_stopped_notification_bypasses_idle_recovery_cooldown(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._last_audio_recovery_at = 40.0
+        window._last_callback_status_count = 2
+        restarts: list[str] = []
+        window.start_audio = lambda: restarts.append("restart")
+        snapshot = SimpleNamespace(
+            running=False,
+            status="Stopped",
+            callback_status="device stopped",
+            callback_status_count=3,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=40.25):
+            self.assertTrue(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(restarts, ["restart"])
+
+    def test_stale_device_stopped_notification_does_not_restart_again(self) -> None:
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), fake_output(), cable_playback],
+            default_output=cable_playback,
+        )
+        window._force_auto_start = True
+        window._last_callback_status_count = 3
+        restarts: list[str] = []
+        window.start_audio = lambda: restarts.append("restart")
+        snapshot = SimpleNamespace(
+            running=False,
+            status="Stopped",
+            callback_status="device stopped",
+            callback_status_count=3,
+            dsp_error_count=0,
+            dsp=SimpleNamespace(
+                raw_channel_levels=[0.0] * 16,
+                left_meter=0.0,
+                right_meter=0.0,
+                master_volume=1.0,
+                master_muted=False,
+            ),
+        )
+
+        with patch("downmix_renderer.app.monotonic", return_value=49.0):
+            self.assertFalse(window._maybe_recover_audio_stream(snapshot))
+
+        self.assertEqual(restarts, [])
+
     def test_recovery_pauses_instead_of_restarting_when_windows_default_is_direct_output(self) -> None:
         speakers = fake_output()
         cable_playback = fake_cable_playback_output()
@@ -2029,8 +2790,9 @@ class AppUiTests(unittest.TestCase):
             self.assertFalse(window._maybe_recover_audio_stream(snapshot))
 
         self.assertEqual(restarts, [])
-        self.assertEqual(stop_calls, [False])
-        self.assertTrue(window._paused_for_direct_output)
+        self.assertEqual(stop_calls, [])
+        self.assertFalse(window._paused_for_direct_output)
+        self.assertIsNotNone(window._direct_output_handoff_generation)
 
     def test_disabled_renderer_does_not_restart_from_stale_watchdog_status(self) -> None:
         speakers = fake_output()
@@ -2092,6 +2854,27 @@ class AppUiTests(unittest.TestCase):
         self.assertTrue(any("liveness_failed" in line for line in window._device_lifecycle_events))
         self.assertTrue(any("liveness_rebuild_teardown_complete" in line for line in window._device_lifecycle_events))
 
+    def test_default_output_tracking_uses_endpoint_identity_not_only_portaudio_id(self) -> None:
+        first = fake_endpoint_output(22, "Speakers (Realtek(R) Audio)", "{endpoint-a}")
+        second = fake_endpoint_output(22, "Speakers (Realtek(R) Audio)", "{endpoint-b}")
+        window = self.make_window(
+            {"baseline_recovery_version": BASELINE_RECOVERY_VERSION},
+            devices=[fake_input(), first, second],
+            default_output=first,
+        )
+        window._last_default_output_id = first.id
+        window._last_default_output_signature = window._default_output_signature(first)
+        window._manual_override_default_id = first.id
+        window._manual_override_default_signature = window._default_output_signature(first)
+
+        changed = window._observe_default_output(second)
+
+        self.assertTrue(changed)
+        self.assertEqual(window._last_default_output_id, second.id)
+        self.assertEqual(window._last_default_output_signature, window._default_output_signature(second))
+        self.assertIsNone(window._manual_override_default_id)
+        self.assertIsNone(window._manual_override_default_signature)
+
     def test_stale_liveness_checks_do_not_touch_current_stream(self) -> None:
         window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
         window.engine._running = True
@@ -2128,11 +2911,13 @@ class AppUiTests(unittest.TestCase):
         window.engine.stop = fake_stop
         window.start_audio = lambda liveness_attempt=0: starts.append(liveness_attempt)
 
-        window._verify_audio_liveness(4, baseline_callbacks=0, baseline_frames=0, attempt=0)
+        with patch("downmix_renderer.app.monotonic", return_value=60.0):
+            window._verify_audio_liveness(4, baseline_callbacks=0, baseline_frames=0, attempt=0)
 
-        self.assertEqual(stops, [False])
+        self.assertEqual(stops, [])
         self.assertEqual(starts, [])
-        self.assertTrue(window._paused_for_direct_output)
+        self.assertFalse(window._paused_for_direct_output)
+        self.assertIsNotNone(window._direct_output_handoff_generation)
         self.assertTrue(window._force_auto_start)
 
     def test_previous_running_session_resumes_on_launch(self) -> None:
@@ -2145,6 +2930,41 @@ class AppUiTests(unittest.TestCase):
         )
 
         self.assertTrue(window._force_auto_start)
+
+    def test_launch_autostart_timer_does_not_interrupt_first_manual_output_switch(self) -> None:
+        speakers = fake_output()
+        usb = fake_usb_output()
+        cable_playback = fake_cable_playback_output()
+        window = self.make_window(
+            {
+                "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                "was_running": True,
+            },
+            devices=[fake_input(), speakers, usb, cable_playback],
+            default_output=speakers,
+        )
+        starts: list[str] = []
+        stops: list[bool] = []
+
+        def fake_start_audio() -> None:
+            starts.append(window.output_combo.currentText())
+            window.engine._running = True
+
+        def fake_stop(resume_keep_awake: bool = True) -> None:
+            stops.append(resume_keep_awake)
+            window.engine._running = False
+
+        window.start_audio = fake_start_audio
+        window.engine.stop = fake_stop
+        window.engine._running = True
+        window._force_auto_start = True
+
+        window._set_combo_device(window.output_combo, usb)
+        window._auto_start_if_needed()
+
+        self.assertEqual(starts, ["Headphones (Qudelix-5K)"])
+        self.assertEqual(stops, [])
+        self.assertFalse(window._paused_for_direct_output)
 
     def test_system_boot_autostart_uses_existing_startup_helper(self) -> None:
         window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
@@ -2163,8 +2983,19 @@ class AppUiTests(unittest.TestCase):
                     "system_boot_autostart": True,
                 }
             )
+            window._sync_system_boot_autostart_after_launch()
 
         helper.assert_called_once_with(True, window._app_root)
+
+    def test_qt_scaling_configuration_sets_dpi_environment_defaults(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QT_ENABLE_HIGHDPI_SCALING", None)
+            os.environ.pop("QT_AUTO_SCREEN_SCALE_FACTOR", None)
+
+            configure_qt_scaling()
+
+            self.assertEqual(os.environ["QT_ENABLE_HIGHDPI_SCALING"], "1")
+            self.assertEqual(os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"], "1")
 
 
 if __name__ == "__main__":

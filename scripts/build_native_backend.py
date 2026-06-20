@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DLL = ROOT / "downmix_renderer" / "downmix_renderer_native.dll"
+PDB = DLL.with_suffix(".pdb")
 SOURCE = ROOT / "cpp_backend" / "downmix_native.cpp"
 
 
@@ -42,6 +43,8 @@ def main() -> int:
         "-lavrt",
     ]
     subprocess.check_call(command, cwd=ROOT)
+    if PDB.exists():
+        PDB.unlink()
     print(DLL)
     return 0
 

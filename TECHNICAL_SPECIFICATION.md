@@ -1,6 +1,6 @@
 # Downmix Renderer Technical Specification
 
-Last updated: 2026-06-15
+Last updated: 2026-06-21
 
 Current local production-test artifact: `production testing\Downmixrenderer.exe`
 
@@ -130,16 +130,16 @@ Each preset stores:
 - Channel trim left/right dB.
 - Output matching keywords.
 
-Presets are user-created; the app starts with no built-in presets. Manual preset selection suppresses automatic switching until Windows default output changes.
+Presets are user-created; the app starts with no built-in presets. Manual preset selection suppresses automatic switching until Windows default output identity changes.
 
 ### 3.4 Smart Output Switching
 
-Smart preset switching polls device state every 500 ms. Native WASAPI endpoint default state is preferred over PortAudio's cached host API default when available, so Windows default-output flips are detected without waiting for stale PortAudio state to refresh. Every third poll may still force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes a refresh icon, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
+Smart preset switching polls device state every 500 ms. Native WASAPI endpoint default state is preferred over PortAudio's cached host API default when available, so Windows default-output flips are detected without waiting for stale PortAudio state to refresh. The observed default output is tracked by an identity tuple that includes native endpoint id when present, device name, host API, channel count, sample rate, and whether the endpoint is a VB-CABLE playback endpoint. This prevents reused or stale PortAudio numeric ids from suppressing a real Windows output change. Every third poll may still force a PortAudio inventory refresh if no probe is running and either the renderer is stopped or the native backend is active. The route bar also exposes a refresh icon, which forces immediate re-enumeration through the same preservation logic without requiring an app restart.
 
 Default-output routing rule:
 
 - Windows default output is `CABLE Input` or another VB-CABLE playback endpoint: the renderer may start or recover the selected render route.
-- Windows default output is a normal speaker/DAC endpoint: the renderer stops capture/playback, disables keep-awake for that route, fully releases the stream, and preserves resume intent.
+- Windows default output is a normal speaker/DAC endpoint: the renderer enters direct-output handoff. If VB-CABLE becomes silent, the renderer pauses capture/playback, disables keep-awake for that route, fully releases the stream, and preserves resume intent. If VB-CABLE keeps receiving active audio, the renderer retargets the bridge to the new physical endpoint after `DIRECT_OUTPUT_HANDOFF_BRIDGE_RETARGET_SECONDS`.
 - Automatic recovery/watchdog paths must satisfy both user intent (`_force_auto_start` or a currently running stream) and the current Windows default-output rule before calling `start_audio()`.
 
 Preset matching score:
@@ -151,6 +151,40 @@ Preset matching score:
 - Non-generic preset keyword found in active output name: +5 per keyword.
 
 The highest scoring available preset is selected.
+
+### 3.4.1 Output-Switching Architecture Decision
+
+Final decision: keep the renderer in control of the VB-CABLE-to-physical-output bridge and treat Windows default-output changes as asynchronous stream-routing events. The UI shell does not automate Apple Music, does not pause/play the media app, and does not rely on a track change. Instead, it applies the following state machine:
+
+1. Detect the new Windows default-output identity using native endpoint metadata when available.
+2. If the new default is direct speaker/DAC output while the renderer is active, enter direct-output handoff instead of immediately stopping the stream.
+3. Watch the raw VB-CABLE input level from renderer snapshots.
+4. If the cable stays active for at least `DIRECT_OUTPUT_HANDOFF_BRIDGE_RETARGET_SECONDS` (`120 ms`), select the new direct endpoint in the renderer output combo and restart only the renderer stream while preserving direct-output handoff state. This handles Apple Music Lossless, where Apple can keep feeding the old VB-CABLE stream until the current track is recreated.
+5. If the cable goes silent for `DIRECT_OUTPUT_HANDOFF_SILENCE_SECONDS` (`450 ms`), pause/release the renderer path. This preserves the smooth Dolby Atmos/direct-output behavior where Apple Music or Windows routing moves the active audio away from VB-CABLE correctly.
+6. If Windows default returns to VB-CABLE, schedule a short settled resume (`DIRECT_OUTPUT_RESUME_SETTLE_MS`, `120 ms`) so route restarts do not race endpoint changes.
+
+Alternatives considered and rejected:
+
+- Force stop/restart on every direct-output switch: rejected because it breaks the smooth Dolby Atmos path and adds avoidable glitches.
+- Automate Apple Music pause/play or track changes: rejected because it is brittle, user-visible, and outside the renderer's ownership boundary.
+- Wait for Apple Music to change tracks: rejected because it leaves Lossless playback on the previous physical endpoint until the user changes tracks.
+- Always rebuild immediately on any default-output observation: rejected because device notifications are asynchronous and can arrive in different orders; immediate rebuilds increase race risk during rapid switching.
+- Rewrite native audio routing or DSP behavior: rejected because the verified bug is a UI/state stream-routing issue, not a matrix/DSP/backend audio-processing defect.
+
+Why the final implementation is reliable:
+
+- It follows Windows Core Audio stream-routing guidance: default-device and session notifications are asynchronous, clients must be prepared to reopen/rebind streams quickly, and state transfer must be owned by the application.
+- It uses measured signal state from the renderer (`raw_channel_levels`) rather than guessing the media app's mode. Active cable input means keep bridging and retarget; sustained silence means release.
+- It reuses existing route selection, device identity, liveness, and recovery helpers instead of creating a parallel device path.
+- It is generation-guarded and bounded. Stale liveness checks are ignored, liveness rebuilds are limited, and stale miniaudio callback-status text is consumed once.
+- It changes only the renderer bridge target during Lossless handoff. Matrix coefficients, DSP math, PEQ, limiter, channel mapping, and backend processing are untouched.
+
+Reference material used for this decision:
+
+- Windows Core Audio Stream Routing: <https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-routing>
+- Stream Routing Implementation Considerations: <https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-routing-implementation-considerations>
+- Qt QWidget painting/update behavior: <https://doc.qt.io/qt-6/qwidget.html>
+- Qt threading basics for GUI-vs-worker ownership: <https://doc.qt.io/qt-6.8/thread-basics.html>
 
 ### 3.5 Channel Layout Views
 
@@ -809,11 +843,13 @@ Native callback errors:
 
 ### 10.3 Runtime Stream Recovery
 
-The native backend publishes miniaudio device notifications for stop, reroute, interruption, and unlock events into the snapshot callback status. The UI shell handles recovery from the main thread. Before any automatic restart, it forces a fresh device/default-output check, confirms the user has not stopped rendering, and confirms Windows default output is VB-CABLE. If the default output is a direct speaker/DAC endpoint, recovery pauses and releases the stream instead of restarting it.
+The native backend publishes miniaudio device notifications for stop, reroute, interruption, and unlock events into the snapshot callback status. The UI shell handles recovery from the main thread. Fresh stop/reroute/interruption statuses bypass the idle-recovery cooldown because they are explicit device events. Stale callback status counts are ignored so old notification text cannot trigger repeated rebuilds during rapid switching. Before any automatic restart, recovery forces a fresh device/default-output check, confirms the user has not stopped rendering, and confirms the current Windows default-output rule allows the action.
+
+If the default output is a direct speaker/DAC endpoint, recovery uses direct-output handoff instead of blindly restarting. Active Lossless input can retarget the renderer bridge to the direct endpoint; silent cable input pauses/releases the renderer path.
 
 After every start or device-switch recovery, the UI schedules a short liveness check. If callback or frame counters do not advance within `AUDIO_LIVENESS_TIMEOUT_MS`, the app treats the start as silent/faulted, fully tears the stream down, re-enumerates devices, and rebuilds once through the same direction-neutral start path. Stale liveness checks are ignored through a start-generation guard.
 
-Recovery is rate-limited by `RECOVERY_COOLDOWN_SECONDS` and ignores intentional silence when the Windows endpoint volume is muted or effectively zero.
+Idle/silent-output recovery is rate-limited by `RECOVERY_COOLDOWN_SECONDS` and ignores intentional silence when the Windows endpoint volume is muted or effectively zero. Explicit device notifications are not delayed by this idle cooldown.
 
 ### 10.4 Settings Errors
 
@@ -852,6 +888,8 @@ Volume follower selection:
 
 Startup autostart returns `(False, detail)` when APPDATA is unavailable or shortcut creation/removal fails. The UI re-syncs checkbox state from the actual Startup folder and treats stale shortcuts pointing at missing or relocated executables as disabled.
 
+When enabling or disabling boot autostart, `downmix_renderer.startup` scans only the per-user Startup folder and only launcher-style files (`.lnk`, `.cmd`, `.bat`, `.ps1`). It removes related Downmix Renderer entries by explicit file name, shortcut target, target location inside the app root, or script body markers such as `Downmixrenderer.exe` / `renderer_app.py`. Unrelated Startup items are left untouched.
+
 ### 10.8 Bonjour / External Service Errors
 
 The renderer does not reference Bonjour, mDNS, ZeroConf, dns-sd, AirPlay, or Apple network discovery APIs. If Bonjour-related errors appear during launch or media playback, they are expected to originate from the local Windows/media environment or another installed component rather than from Downmix Renderer startup or routing logic.
@@ -889,12 +927,25 @@ Native backend clamps requested block size between 64 and 4096 frames and reserv
 The UI uses timers instead of blocking loops:
 
 - 40 ms UI refresh.
-- 1.5 s device polling.
+- 500 ms device polling.
 - 70 ms live animated backdrop update matching `Finalised version 3`, with root/page repaint regions clipped to visible areas.
 - Room visualizer animation relaxes from 55 ms idle to 90 ms while rendering.
 - 260 ms PEQ debounce.
 
 Route probing runs in a `QThread` and stops/resumes renderer state around capture.
+
+### 11.4 Current Responsiveness Measurements
+
+Latest safe-harness measurements were taken with `DOWNMIX_RENDERER_AUDIO_BACKEND=python`, mocked device inventory, and isolated settings so real audio hardware and user state were not disturbed:
+
+| Path | Median | p95 | Notes |
+| --- | ---: | ---: | --- |
+| Window construction | ~25 ms | ~28 ms | Dominated by normal Qt widget setup and initial device/settings mocks in the test harness |
+| `update_ui()` steady-state loop | ~0.065 ms | ~0.11 ms | Below the 40 ms UI timer budget by a wide margin |
+| Backdrop advance scheduling | ~0.0004 ms | ~0.0005 ms | Uses Qt `update()` so paint events are coalesced by Qt |
+| Lossless bridge retarget handoff | ~0.044 ms | ~0.06 ms | Retargets only the renderer bridge and reuses normal start/liveness checks |
+
+Optimization decision: no broad refactor is justified by these numbers. The most important performance rule is to keep blocking device enumeration, route probing, and startup shortcut work out of the steady UI path, while leaving the verified audio-routing state machine untouched. Future optimization proposals must include before/after measurements and regression coverage.
 
 ## 12. Testing And Validation
 
@@ -912,7 +963,7 @@ Current unit test coverage:
 | `tests/test_presets.py` | Preset schema, matching, keyword behavior, trim/PEQ persistence |
 | `tests/test_route_probe.py` | Route probe classification and channel-fill detection |
 | `tests/test_settings.py` | Settings path safety and atomic persistence behavior |
-| `tests/test_startup.py` | Startup shortcut creation/removal behavior and stale target validation |
+| `tests/test_startup.py` | Startup shortcut creation/removal behavior, stale target validation, and related-entry cleanup without touching unrelated Startup items |
 
 ### 12.2 Full Validation Command
 
@@ -950,7 +1001,7 @@ Taskbar identity requirements:
 
 - `renderer_app.spec` embeds `assets\downmix_renderer_logo.ico` into `Downmixrenderer.exe`.
 - The icon must contain at least 16, 32, 48, and 256 px frames.
-- Startup calls `SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)` before creating `QApplication`.
+- Startup configures Qt high-DPI scaling defaults, then calls `SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)` before creating `QApplication`.
 - The main window sends `WM_SETICON` for both `ICON_SMALL` and `ICON_BIG` from the local `.ico` asset, so fresh Windows profiles do not depend on a manual pin to associate the icon.
 
 ### 12.4 Manual End-To-End Validation Checklist
@@ -972,18 +1023,20 @@ Recommended validation pass:
 13. Apply channel trim values inside `-24..0 dB` and confirm they persist.
 14. Create, update, select, and delete a preset.
 15. Confirm smart switching selects matching presets when Windows default output changes.
-16. Switch Windows default output from VB-CABLE to normal speakers while rendering; confirm audio routes directly within about 1 second and the renderer status becomes paused, with no Apple Music restart.
+16. Switch Windows default output from VB-CABLE to normal speakers while rendering a source that stops feeding VB-CABLE; confirm audio routes directly within about 1 second and the renderer pauses/releases, with no Apple Music restart.
 17. Switch Windows default output from normal speakers back to VB-CABLE; confirm the renderer resumes without app restart.
-18. With renderer stopped and Windows default output on normal speakers, leave the app open for 15 minutes and confirm no capture/render restart attempts.
-19. Rapidly switch Windows default output 10+ times and confirm there are no crashes, stale handles, or audible artifacts.
-20. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
-21. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled only while Windows default output is VB-CABLE.
-22. Open Raw Monitor in both `7.1 Monitor` and `9.1.6 Monitor`; confirm every label lights against the same Channel Field source, including `SL/SR` and height channels.
-23. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
-24. Launch on a clean Windows profile and confirm the taskbar icon is correct immediately before pinning.
-25. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render when default output is VB-CABLE.
-26. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
-27. Relaunch app and confirm settings/presets restore.
+18. While Apple Music Dolby Atmos is actively playing, switch between direct outputs and confirm switching is seamless, with no app restart and no track change.
+19. While Apple Music Lossless is actively playing, switch between direct outputs and confirm the current track follows the newly selected output without changing tracks.
+20. With renderer stopped and Windows default output on normal speakers, leave the app open for 15 minutes and confirm no capture/render restart attempts.
+21. Rapidly switch Windows default output 10+ times and confirm there are no crashes, stale handles, or audible artifacts.
+22. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
+23. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled only while Windows default output is VB-CABLE.
+24. Open Raw Monitor in both `7.1 Monitor` and `9.1.6 Monitor`; confirm every label lights against the same Channel Field source, including `SL/SR` and height channels.
+25. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
+26. Launch on a clean Windows profile and confirm the taskbar icon is correct immediately before pinning.
+27. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render when default output is VB-CABLE.
+28. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
+29. Relaunch app and confirm settings/presets restore.
 
 ## 13. Known Limitations
 

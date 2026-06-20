@@ -597,6 +597,22 @@ class DspTests(unittest.TestCase):
         self.assertFalse(snapshot.clipping)
         self.assertTrue(np.all(np.isfinite(enhanced_out)))
 
+    def test_sound_enhancer_ramps_makeup_gain_on_enable_to_avoid_block_edge(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_sound_enhancer_enabled(True)
+        frames = 16
+        processor._ensure_scratch(frames)
+        processor._stereo[:frames, :] = 0.05
+        processor._sound_enhancer_applied_gain = 1.0
+
+        applied_gain, limited = processor._apply_sound_enhancer(frames)
+        ratios = processor._stereo[:frames, 0] / 0.05
+
+        self.assertFalse(limited)
+        self.assertGreater(applied_gain, 1.0)
+        self.assertLess(float(ratios[0]), float(ratios[-1]))
+        self.assertAlmostEqual(float(ratios[-1]), applied_gain, places=6)
+
     def test_sound_enhancer_safely_limits_hot_material(self) -> None:
         processor = DownmixProcessor(preamp_db=0)
         processor.set_sound_enhancer_enabled(True)

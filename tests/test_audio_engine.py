@@ -21,6 +21,7 @@ from downmix_renderer.constants import MAX_INPUT_CHANNELS, OUTPUT_CHANNELS, SAMP
 from downmix_renderer.devices import AudioDevice
 from downmix_renderer.dsp import DspSnapshot
 from downmix_renderer.native_audio import NativeBackendUnavailable
+from downmix_renderer.volume import VolumeState
 
 
 def fake_device(mode: str, endpoint_id: str | None = None, samplerate: int = 48000) -> AudioDevice:
@@ -294,6 +295,56 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertEqual(calls[0][2], "ultra")
         self.assertEqual(calls[0][3], 512)
         self.assertEqual(calls[0][4], 192000)
+
+    def test_start_keeps_volume_follower_on_default_endpoint_for_media_keys(self) -> None:
+        master_volume_calls: list[tuple[float, bool]] = []
+
+        class FakeProcessor:
+            def set_master_volume(self, scalar: float, muted: bool = False) -> None:
+                master_volume_calls.append((scalar, muted))
+
+            def set_sample_rate(self, sample_rate: int) -> None:
+                return None
+
+            def reset_runtime_state(self) -> None:
+                return None
+
+        class FakeVolumeFollower:
+            def __init__(self) -> None:
+                self.targets: list[str] = []
+
+            def set_output_endpoint_id(self, endpoint_id: str | None) -> None:
+                self.targets.append(endpoint_id or "")
+
+            def get_state(self) -> VolumeState:
+                scalar = 0.42 if not self.targets else 0.99
+                return VolumeState(scalar, False, True, "test", "selected output")
+
+            def close(self) -> None:
+                return None
+
+        class FakeStream:
+            def __init__(self, **kwargs) -> None:
+                self.cpu_load = 0.0
+                self.latency = (0.0, 0.0)
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        follower = FakeVolumeFollower()
+        engine = AudioEngine(processor=FakeProcessor(), volume_follower=follower, backend="python")
+        with patch("downmix_renderer.audio_engine.sd.Stream", FakeStream):
+            engine.start(fake_device("input", endpoint_id="{input-endpoint}"), fake_device("output", endpoint_id="{output-endpoint}"))
+        engine.close()
+
+        self.assertEqual(follower.targets, [])
+        self.assertEqual(master_volume_calls[-1], (0.42, False))
 
     def test_missing_native_backend_falls_back_to_python_processor(self) -> None:
         with patch(

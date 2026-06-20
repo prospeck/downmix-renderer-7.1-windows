@@ -104,6 +104,7 @@ constexpr double kSoundEnhancerCeiling = 0.8912509381337456; // -1.0 dBFS
 constexpr double kSoundEnhancerAttackAlpha = 0.85;
 constexpr double kSoundEnhancerReleaseAlpha = 0.08;
 constexpr std::array<double, 3> kSoundEnhancerTruePeakFractions = {{0.25, 0.5, 0.75}};
+constexpr uint32_t kSoundEnhancerGainRampSamples = 64;
 
 struct NativeDspSnapshot {
     float channelLevels[kInputChannels];
@@ -766,11 +767,13 @@ public:
         double soundEnhancerGain = 1.0;
         if (soundEnhancerResetPending_.exchange(0, std::memory_order_acq_rel) != 0) {
             soundEnhancerSafetyGain_ = 1.0;
+            soundEnhancerAppliedGain_ = 1.0;
         }
         if (soundEnhancerEnabled) {
             soundEnhancerGain = apply_sound_enhancer(frames, soundEnhancerLimited);
         } else {
             soundEnhancerSafetyGain_ = 1.0;
+            soundEnhancerAppliedGain_ = 1.0;
         }
         peakBeforeLimiter = peak_stereo(frames);
 
@@ -970,10 +973,31 @@ private:
         soundEnhancerSafetyGain_ = smoothedSafetyGain;
 
         double appliedGain = kSoundEnhancerMakeupGain * appliedSafetyGain;
-        for (uint32_t frame = 0; frame < frames; ++frame) {
-            const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
-            stereo_[stereoIndex] *= appliedGain;
-            stereo_[stereoIndex + 1] *= appliedGain;
+        double previousGain = soundEnhancerAppliedGain_;
+        if (!std::isfinite(previousGain) || previousGain <= 0.0) {
+            previousGain = appliedGain;
+        }
+        const double startGain = std::min(previousGain, appliedGain);
+        const uint32_t rampFrames = std::min(frames, kSoundEnhancerGainRampSamples);
+        if (rampFrames > 1 && std::abs(appliedGain - startGain) > 1e-6) {
+            const double step = (appliedGain - startGain) / static_cast<double>(rampFrames - 1);
+            for (uint32_t frame = 0; frame < rampFrames; ++frame) {
+                const double gain = startGain + (step * static_cast<double>(frame));
+                const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
+                stereo_[stereoIndex] *= gain;
+                stereo_[stereoIndex + 1] *= gain;
+            }
+            for (uint32_t frame = rampFrames; frame < frames; ++frame) {
+                const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
+                stereo_[stereoIndex] *= appliedGain;
+                stereo_[stereoIndex + 1] *= appliedGain;
+            }
+        } else {
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                const size_t stereoIndex = static_cast<size_t>(frame) * kOutputChannels;
+                stereo_[stereoIndex] *= appliedGain;
+                stereo_[stereoIndex + 1] *= appliedGain;
+            }
         }
 
         const double postPeak = estimated_true_peak_stereo(frames);
@@ -988,6 +1012,7 @@ private:
             limited = true;
         }
 
+        soundEnhancerAppliedGain_ = appliedGain;
         return appliedGain;
     }
 
@@ -1656,6 +1681,7 @@ private:
     std::atomic<int32_t> inputLayout_{0};
     double limiterGain_ = 1.0;
     double soundEnhancerSafetyGain_ = 1.0;
+    double soundEnhancerAppliedGain_ = 1.0;
 
     std::array<std::atomic<float>, kInputChannels> snapshotLevels_{};
     std::array<std::atomic<float>, kInputChannels> snapshotRms_{};
