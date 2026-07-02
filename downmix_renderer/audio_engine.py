@@ -90,15 +90,16 @@ class OutputKeepAwake:
         if renderer_running or not self._enabled or output_device is None:
             self.stop()
             return
-        if self._stream is not None and self._device_id == output_device.id and self._stream_sample_rate == self._sample_rate:
+        stream_sample_rate = self._keep_awake_sample_rate(output_device)
+        if self._stream is not None and self._device_id == output_device.id and self._stream_sample_rate == stream_sample_rate:
             return
         self.stop()
-        if not self._output_format_supported(output_device):
+        if not self._output_format_supported(output_device, stream_sample_rate):
             return
         stream: sd.OutputStream | None = None
         try:
             stream = sd.OutputStream(
-                samplerate=self._sample_rate,
+                samplerate=stream_sample_rate,
                 blocksize=BLOCK_SIZE,
                 channels=OUTPUT_CHANNELS,
                 device=output_device.id,
@@ -114,15 +115,15 @@ class OutputKeepAwake:
             return
         self._stream = stream
         self._device_id = output_device.id
-        self._stream_sample_rate = self._sample_rate
+        self._stream_sample_rate = stream_sample_rate
         self._last_error = ""
 
-    def _output_format_supported(self, output_device: AudioDevice) -> bool:
+    def _output_format_supported(self, output_device: AudioDevice, sample_rate: int) -> bool:
         try:
             sd.check_output_settings(
                 device=output_device.id,
                 channels=OUTPUT_CHANNELS,
-                samplerate=self._sample_rate,
+                samplerate=sample_rate,
                 dtype="float32",
             )
         except Exception as exc:
@@ -130,6 +131,13 @@ class OutputKeepAwake:
             self._last_error = f"{type(exc).__name__}: {detail}"
             return False
         return True
+
+    def _keep_awake_sample_rate(self, output_device: AudioDevice) -> int:
+        try:
+            output_rate = int(round(float(output_device.default_samplerate)))
+        except (TypeError, ValueError, OverflowError):
+            output_rate = 0
+        return output_rate if output_rate > 0 else self._sample_rate
 
     def stop(self) -> None:
         stream = self._stream
@@ -243,7 +251,6 @@ class AudioEngine:
         requested_profile = _normalize_stream_profile(stream_profile)
         requested_sample_rate_mode = _normalize_sample_rate_mode(sample_rate_mode)
         sample_rate = _resolve_sample_rate(requested_sample_rate_mode, input_device, output_device)
-        _check_stream_format_supported(input_device, output_device, sample_rate)
         active_profile = requested_profile
         if hasattr(self.processor, "set_sample_rate"):
             self.processor.set_sample_rate(sample_rate)
@@ -501,25 +508,6 @@ def _resolve_sample_rate(
     output_device: AudioDevice | None = None,
 ) -> int:
     return resolve_sample_rate(sample_rate_mode, input_device, output_device)
-
-
-def _check_stream_format_supported(input_device: AudioDevice, output_device: AudioDevice, sample_rate: int) -> None:
-    try:
-        sd.check_input_settings(
-            device=input_device.id,
-            channels=MAX_INPUT_CHANNELS,
-            samplerate=sample_rate,
-            dtype="float32",
-        )
-        sd.check_output_settings(
-            device=output_device.id,
-            channels=OUTPUT_CHANNELS,
-            samplerate=sample_rate,
-            dtype="float32",
-        )
-    except Exception as exc:
-        detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-        raise RuntimeError(f"Unsupported WASAPI route format: {type(exc).__name__}: {detail}") from exc
 
 
 def _scaled_stream_block_size(base_block_size: int, sample_rate: int) -> int:

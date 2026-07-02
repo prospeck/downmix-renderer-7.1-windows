@@ -116,7 +116,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertEqual(snapshot.sample_rate, 192000)
         self.assertEqual(snapshot.sample_rate_mode, "192000")
 
-    def test_start_preflights_output_format_before_opening_renderer_stream(self) -> None:
+    def test_start_uses_renderer_stream_path_even_when_portaudio_format_preflight_rejects_route(self) -> None:
         opened: list[dict[str, object]] = []
 
         class FakeStream:
@@ -141,10 +141,11 @@ class AudioEngineSettingsTests(unittest.TestCase):
                 patch("downmix_renderer.audio_engine.sd.check_output_settings", side_effect=RuntimeError("invalid sample rate")),
                 patch("downmix_renderer.audio_engine.sd.Stream", FakeStream),
             ):
-                with self.assertRaisesRegex(RuntimeError, "invalid sample rate"):
-                    engine.start(fake_device("input"), fake_device("output"), "ultra", sample_rate_mode="192000")
+                engine.start(fake_device("input"), fake_device("output"), "ultra", sample_rate_mode="192000")
 
-            self.assertEqual(opened, [])
+            self.assertTrue(engine.snapshot().running)
+            self.assertEqual(len(opened), 1)
+            self.assertEqual(opened[0]["samplerate"], 192000)
         finally:
             engine.close()
 
@@ -542,6 +543,38 @@ class AudioEngineSettingsTests(unittest.TestCase):
 
         self.assertFalse(keep_awake.active)
         self.assertIn("output unavailable", keep_awake.last_error)
+
+    def test_keep_awake_uses_output_default_rate_not_renderer_input_rate(self) -> None:
+        keep_awake = OutputKeepAwake()
+        opened: list[dict[str, object]] = []
+        checked: list[dict[str, object]] = []
+
+        class FakeOutputStream:
+            def __init__(self, **kwargs) -> None:
+                opened.append(kwargs)
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        def record_check(**kwargs) -> None:
+            checked.append(kwargs)
+
+        output = fake_device("output", samplerate=48000)
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", side_effect=record_check),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
+        ):
+            keep_awake.set_enabled(True, output, renderer_running=False, sample_rate=192000)
+
+        self.assertTrue(keep_awake.active)
+        self.assertEqual(checked[0]["samplerate"], 48000)
+        self.assertEqual(opened[0]["samplerate"], 48000)
 
     def test_keep_awake_preflights_output_format_before_opening_stream(self) -> None:
         keep_awake = OutputKeepAwake()
