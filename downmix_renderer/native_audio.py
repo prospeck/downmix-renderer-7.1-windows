@@ -56,6 +56,7 @@ class _NativeEngineSnapshot(ctypes.Structure):
         ("dsp_error_count", ctypes.c_int32),
         ("callback_invocation_count", ctypes.c_uint64),
         ("processed_frame_count", ctypes.c_uint64),
+        ("xrun_count", ctypes.c_uint64),
         ("mmcss_registered", ctypes.c_int32),
         ("cpu_load", ctypes.c_float),
         ("input_latency", ctypes.c_float),
@@ -93,6 +94,7 @@ class NativeEngineRuntime:
     dsp_error_count: int
     callback_invocation_count: int
     processed_frame_count: int
+    xrun_count: int
     mmcss_registered: bool
     cpu_load: float
     stream_latency: tuple[float, float] | None
@@ -248,6 +250,7 @@ class NativeAudioBackend:
             dsp_error_count=int(raw.dsp_error_count),
             callback_invocation_count=int(raw.callback_invocation_count),
             processed_frame_count=int(raw.processed_frame_count),
+            xrun_count=int(raw.xrun_count),
             mmcss_registered=bool(raw.mmcss_registered),
             cpu_load=float(raw.cpu_load),
             stream_latency=stream_latency,

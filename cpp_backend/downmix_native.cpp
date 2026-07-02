@@ -138,6 +138,7 @@ struct NativeEngineSnapshot {
     int32_t dspErrorCount;
     uint64_t callbackInvocationCount;
     uint64_t processedFrameCount;
+    uint64_t xrunCount;
     int32_t mmcssRegistered;
     float cpuLoad;
     float inputLatency;
@@ -1906,6 +1907,7 @@ public:
         callbackStatusCount_.store(0, std::memory_order_relaxed);
         callbackInvocationCount_.store(0, std::memory_order_relaxed);
         processedFrameCount_.store(0, std::memory_order_relaxed);
+        xrunCount_.store(0, std::memory_order_relaxed);
         mmcssRegistered_.store(0, std::memory_order_relaxed);
         mmcssAttempted_.store(0, std::memory_order_relaxed);
         deviceNotificationType_.store(-1, std::memory_order_relaxed);
@@ -1937,6 +1939,7 @@ public:
         out.dspErrorCount = dspErrorCount_.load(std::memory_order_relaxed);
         out.callbackInvocationCount = callbackInvocationCount_.load(std::memory_order_relaxed);
         out.processedFrameCount = processedFrameCount_.load(std::memory_order_relaxed);
+        out.xrunCount = xrunCount_.load(std::memory_order_relaxed);
         out.mmcssRegistered = mmcssRegistered_.load(std::memory_order_relaxed);
         out.cpuLoad = cpuLoad_.load(std::memory_order_relaxed);
         out.inputLatency = static_cast<float>(blockSize_) / static_cast<float>(sampleRate_);
@@ -2002,7 +2005,11 @@ private:
         const double elapsed = std::chrono::duration<double>(endTime - startTime).count();
         const double budget = static_cast<double>(frameCount) / static_cast<double>(self->sampleRate_);
         if (budget > 0.0) {
-            self->cpuLoad_.store(static_cast<float>(elapsed / budget), std::memory_order_relaxed);
+            const double load = elapsed / budget;
+            self->cpuLoad_.store(static_cast<float>(load), std::memory_order_relaxed);
+            if (load > 1.0) {
+                self->xrunCount_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -2065,6 +2072,7 @@ private:
     std::atomic<int32_t> callbackStatusCount_{0};
     std::atomic<uint64_t> callbackInvocationCount_{0};
     std::atomic<uint64_t> processedFrameCount_{0};
+    std::atomic<uint64_t> xrunCount_{0};
     std::atomic<int32_t> mmcssRegistered_{0};
     std::atomic<int32_t> mmcssAttempted_{0};
     std::atomic<int32_t> deviceNotificationType_{-1};

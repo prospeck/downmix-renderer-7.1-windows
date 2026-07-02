@@ -9,6 +9,7 @@ Last updated: 2026-07-02
 - Kept `downmix_renderer/`, `cpp_backend/`, `assets/`, `scripts/`, and `tests/` in place because they already match the actual hybrid PyQt/C++ project boundaries.
 - Removed the stale tracked `production testing/` package subtree in the verified baseline checkpoint; the current public release artifact is rebuilt locally as `Downmix Renderer Software/` and remains ignored by git.
 - Updated `scripts/build_native_backend.py` to remove generated native `.pdb` and `.lib` side artifacts after building `downmix_renderer_native.dll`.
+- Added `xrun_count` telemetry to engine snapshots. Native mode increments it when callback processing exceeds the callback time budget; Python fallback increments it for callback status events.
 
 ## Confirmed Referenced
 

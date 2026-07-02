@@ -117,9 +117,12 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("config.wasapi.usage = ma_wasapi_usage_pro_audio", native_source)
         self.assertIn("config.wasapi.noAutoConvertSRC = MA_TRUE", native_source)
         self.assertIn("out.inputLatency = static_cast<float>(blockSize_) / static_cast<float>(sampleRate_)", native_source)
+        self.assertIn("uint64_t xrunCount", native_source)
+        self.assertIn("xrunCount_.fetch_add", native_source)
         self.assertNotIn("capturePeriodSize_", native_source)
         self.assertNotIn("playbackPeriodSize_", native_source)
         self.assertIn('"ultra": ("ultra", "raw")', engine_source)
+        self.assertIn("xrun_count", engine_source)
 
     def test_icon_contains_standard_windows_taskbar_sizes(self) -> None:
         icon_path = ROOT / "assets" / "downmix_renderer_logo.ico"

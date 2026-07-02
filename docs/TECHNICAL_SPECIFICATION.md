@@ -61,6 +61,7 @@ The packaged app loads `downmix_renderer\downmix_renderer_native.dll`, which wra
 - Uses RAW fallback profile with a 256-frame block request at 48 kHz if needed, also scaled by sample rate.
 - Registers the native callback thread with Windows MMCSS using the `Pro Audio` task category and critical AVRT priority when available.
 - Publishes callback-invocation and processed-frame counters so the UI can verify stream liveness after device switches.
+- Publishes an xrun health counter: native mode counts callbacks whose processing time exceeds the callback period budget; Python fallback counts callback status events such as underflow/overflow flags.
 - Exposes a C ABI consumed by Python through `ctypes`.
 
 The UI labels the stream as "Shared WASAPI" to match the native miniaudio configuration (`ma_share_mode_shared`) with pro-audio hints for the ultra profile.
@@ -919,6 +920,7 @@ Performance choices:
 - Native configuration is shared through atomics and immutable PEQ config snapshots.
 - PEQ updates are published atomically and crossfaded, avoiding abrupt discontinuities.
 - Meters and snapshots use atomic values or non-blocking locks.
+- Audio-path health snapshots include callback count, processed-frame count, CPU-load ratio, reported stream latency, callback status count, DSP error count, and xrun count.
 - Python fallback uses reusable numpy scratch arrays.
 - Denormal guards avoid CPU stalls for near-zero biquad states.
 

@@ -33,6 +33,7 @@ class EngineSnapshot:
     dsp_error_count: int
     callback_invocation_count: int
     processed_frame_count: int
+    xrun_count: int
     mmcss_registered: bool
     cpu_load: float
     stream_latency: tuple[float, float] | None
@@ -188,6 +189,7 @@ class AudioEngine:
         self._dsp_error_count = 0
         self._callback_invocation_count = 0
         self._processed_frame_count = 0
+        self._xrun_count = 0
         self._stream_profile = DEFAULT_STREAM_PROFILE
         self._sample_rate_mode = DEFAULT_SAMPLE_RATE_MODE
         self._sample_rate = SAMPLE_RATE
@@ -276,6 +278,7 @@ class AudioEngine:
             self._dsp_error_count = 0
             self._callback_invocation_count = 0
             self._processed_frame_count = 0
+            self._xrun_count = 0
             self._stream_profile = active_profile
             self._sample_rate_mode = requested_sample_rate_mode
             self._sample_rate = sample_rate
@@ -378,6 +381,7 @@ class AudioEngine:
             processed_frame_count = (
                 native_snapshot.processed_frame_count if native_snapshot is not None else self._processed_frame_count
             )
+            xrun_count = native_snapshot.xrun_count if native_snapshot is not None else self._xrun_count
             mmcss_registered = native_snapshot.mmcss_registered if native_snapshot is not None else False
             stream_profile = native_snapshot.stream_profile if native_snapshot is not None else self._stream_profile
             sample_rate = self._sample_rate
@@ -395,6 +399,7 @@ class AudioEngine:
                 dsp_error_count=dsp_error_count,
                 callback_invocation_count=callback_invocation_count,
                 processed_frame_count=processed_frame_count,
+                xrun_count=xrun_count,
                 mmcss_registered=mmcss_registered,
                 cpu_load=cpu_load,
                 stream_latency=stream_latency,
@@ -445,6 +450,7 @@ class AudioEngine:
                     self._status = status_text
                     self._callback_status = status_text
                     self._callback_status_count += 1
+                    self._xrun_count += 1
                     self._callback_status_time = now
                 finally:
                     self._state_lock.release()
