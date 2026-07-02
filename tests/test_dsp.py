@@ -441,6 +441,60 @@ class DspTests(unittest.TestCase):
         self.assertGreater(float(snapshot.channel_levels[10]), 0.001)
         self.assertFalse(np.allclose(snapshot.channel_levels[8:16], snapshot.raw_channel_levels[8:16]))
 
+    def test_9_1_6_upmix_fills_missing_sides_from_5_1_surround_bed(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_monitor_layout("sharur_9_1_6")
+        processor.set_upmix_9_1_6_enabled(True)
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 4] = (0.32 * np.sin(phase)).astype(np.float32)
+        data[:, 5] = (0.27 * np.sin(phase + 0.8)).astype(np.float32)
+
+        processor.process(data)
+        snapshot = processor.snapshot()
+
+        self.assertTrue(snapshot.upmix_9_1_6_active)
+        self.assertGreater(float(snapshot.channel_levels[8]), 0.02)
+        self.assertGreater(float(snapshot.channel_levels[9]), 0.02)
+        self.assertGreater(float(snapshot.channel_levels[6]), 0.02)
+        self.assertGreater(float(snapshot.channel_levels[7]), 0.02)
+        self.assertGreater(float(np.max(snapshot.channel_levels[10:16])), 0.005)
+        self.assertGreater(float(snapshot.channel_levels[4]), float(snapshot.channel_levels[8]))
+        self.assertGreater(float(snapshot.channel_levels[5]), float(snapshot.channel_levels[9]))
+
+    def test_9_1_6_upmix_does_not_light_generated_field_for_center_only_content(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_monitor_layout("sharur_9_1_6")
+        processor.set_upmix_9_1_6_enabled(True)
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 2] = (0.40 * np.sin(phase)).astype(np.float32)
+
+        processor.process(data)
+        snapshot = processor.snapshot()
+
+        self.assertFalse(snapshot.upmix_9_1_6_active)
+        self.assertLessEqual(float(np.max(snapshot.channel_levels[6:16])), 1e-4)
+
+    def test_9_1_6_upmix_preserves_mono_front_image_without_constant_surrounds(self) -> None:
+        processor = DownmixProcessor(preamp_db=0)
+        processor.set_monitor_layout("sharur_9_1_6")
+        processor.set_upmix_9_1_6_enabled(True)
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        mono = (0.34 * np.sin(phase)).astype(np.float32)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 0] = mono
+        data[:, 1] = mono
+
+        processor.process(data)
+        snapshot = processor.snapshot()
+
+        self.assertFalse(snapshot.upmix_9_1_6_active)
+        self.assertLessEqual(float(np.max(snapshot.channel_levels[6:16])), float(snapshot.channel_levels[0]) * 0.05)
+
     def test_windows_sl_maps_to_sharur_sl_not_blc_with_upmix_off(self) -> None:
         processor = DownmixProcessor(preamp_db=0)
         processor.set_monitor_layout("sharur_9_1_6")

@@ -203,6 +203,54 @@ class NativeDspTrimTests(unittest.TestCase):
         self.assert_native_matches_python(backend, python, data, atol=4e-5)
         self.assertTrue(native.snapshot().upmix_9_1_6_enabled)
 
+    def test_native_9_1_6_upmix_side_fill_matches_python_reference(self) -> None:
+        backend = self.make_backend()
+        native = backend.processor
+        python = DownmixProcessor(preamp_db=0)
+
+        native.set_preamp_db(0)
+        native.set_input_layout("windows_7_1")
+        native.set_monitor_layout("sharur_9_1_6")
+        native.set_upmix_9_1_6_enabled(True)
+        python.set_input_layout("windows_7_1")
+        python.set_monitor_layout("sharur_9_1_6")
+        python.set_upmix_9_1_6_enabled(True)
+
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 4] = (0.32 * np.sin(phase)).astype(np.float32)
+        data[:, 5] = (0.27 * np.sin(phase + 0.8)).astype(np.float32)
+
+        self.assert_native_matches_python(backend, python, data, atol=4e-5)
+        snapshot = native.snapshot()
+        self.assertTrue(snapshot.upmix_9_1_6_active)
+        self.assertGreater(float(snapshot.channel_levels[8]), 0.02)
+        self.assertGreater(float(snapshot.channel_levels[9]), 0.02)
+
+    def test_native_9_1_6_upmix_center_only_gate_matches_python_reference(self) -> None:
+        backend = self.make_backend()
+        native = backend.processor
+        python = DownmixProcessor(preamp_db=0)
+
+        native.set_preamp_db(0)
+        native.set_input_layout("windows_7_1")
+        native.set_monitor_layout("sharur_9_1_6")
+        native.set_upmix_9_1_6_enabled(True)
+        python.set_input_layout("windows_7_1")
+        python.set_monitor_layout("sharur_9_1_6")
+        python.set_upmix_9_1_6_enabled(True)
+
+        frames = DRY_DELAY_SAMPLES + 512
+        phase = np.linspace(0.0, 8.0 * np.pi, frames, dtype=np.float64)
+        data = np.zeros((frames, MAX_INPUT_CHANNELS), dtype=np.float32)
+        data[:, 2] = (0.40 * np.sin(phase)).astype(np.float32)
+
+        self.assert_native_matches_python(backend, python, data, atol=4e-5)
+        snapshot = native.snapshot()
+        self.assertFalse(snapshot.upmix_9_1_6_active)
+        self.assertLessEqual(float(np.max(snapshot.channel_levels[6:16])), 1e-4)
+
 
 if __name__ == "__main__":
     unittest.main()

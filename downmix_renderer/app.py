@@ -88,6 +88,7 @@ DIRECT_OUTPUT_HANDOFF_BRIDGE_RETARGET_SECONDS = 0.12
 GITHUB_URL = "https://github.com/prospeck/downmix-renderer-7.1-windows.git"
 APP_USER_MODEL_ID = "Taran.DownmixRenderer.DownmixRenderer"
 WM_SETICON = 0x0080
+APP_DEFAULT_WINDOW_SIZE = QtCore.QSize(1320, 820)
 ICON_SMALL = 0
 ICON_BIG = 1
 IMAGE_ICON = 1
@@ -105,11 +106,25 @@ QWidget#rendererRoot {{
     background-color: {BLACK};
 }}
 QWidget#content,
+QWidget#viewPage,
 QWidget#mainPage,
+QWidget#advancedPage,
+QWidget#advancedBody,
+QWidget#advancedLeftStack,
+QWidget#advancedTopRow,
+QWidget#profileEditorRow,
+QWidget#diagnosticRows,
 QWidget#presetsPage,
 QWidget#presetsBody,
 QWidget#presetListContainer,
 QWidget#profileActions,
+QWidget#viewTopBar,
+QWidget#routeControlRow,
+QWidget#viewModeRow,
+QWidget#viewModeGroup,
+QWidget#viewStyleSelector,
+QWidget#visualizerStack,
+QWidget#profileActionRow,
 QWidget#rendererLeftColumn,
 QWidget#rendererCenterColumn,
 QWidget#rendererRightColumn,
@@ -496,7 +511,8 @@ QPushButton#profileAction {{
     border: 1px solid #2a2a2a;
     border-radius: 7px;
     min-height: 32px;
-    padding: 5px 12px;
+    max-height: 34px;
+    padding: 0px 12px;
     font-weight: 650;
 }}
 QPushButton#profileAction:hover {{
@@ -507,18 +523,21 @@ QPushButton#profileAction:pressed {{
     border-color: #eeeeee;
     background-color: #0d0d0d;
 }}
+QPushButton#diagnosticsLaunch,
 QPushButton#rawMonitor {{
     color: {TEXT};
     background-color: #020202;
     border: 1px solid #2a2a2a;
     border-radius: 7px;
-    min-height: 30px;
+    min-height: 42px;
     font-weight: 600;
 }}
+QPushButton#diagnosticsLaunch:hover,
 QPushButton#rawMonitor:hover {{
     border-color: #777777;
     background-color: #070707;
 }}
+QPushButton#diagnosticsLaunch:pressed,
 QPushButton#rawMonitor:pressed {{
     border-color: #eeeeee;
     background-color: #0c0c0c;
@@ -633,18 +652,39 @@ QPushButton#mode[active="true"] {{
     background-color: #101010;
     border-color: {ACCENT};
 }}
+QPushButton#viewModeButton {{
+    color: {MID};
+    background-color: #020202;
+    border: 1px solid #202020;
+    border-radius: 7px;
+    padding: 0px 13px;
+    font-size: 10px;
+    font-weight: 760;
+    min-height: 24px;
+    max-height: 24px;
+}}
+QPushButton#viewModeButton:hover {{
+    color: {TEXT};
+    border-color: #666666;
+    background-color: #050505;
+}}
+QPushButton#viewModeButton[active="true"] {{
+    color: {TEXT};
+    border-color: {ACCENT};
+    background-color: #050505;
+}}
 QSlider::groove:horizontal {{
     height: 5px;
-    background: #101820;
+    background: #121212;
     border-radius: 3px;
 }}
 QSlider::sub-page:horizontal {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {BLUE}, stop:1 {SUCCESS});
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #f4f4f4, stop:1 #9c9c9c);
     border-radius: 3px;
 }}
 QSlider::handle:horizontal {{
     background: #ffffff;
-    border: 1px solid #4cc8ff;
+    border: 1px solid #eeeeee;
     width: 16px;
     height: 16px;
     margin: -6px 0;
@@ -684,8 +724,8 @@ QCheckBox::indicator {{
     border: 1px solid #202020;
 }}
 QCheckBox::indicator:checked {{
-    background: #e8e8e8;
-    border-color: {ACCENT};
+    background: #173923;
+    border-color: {SUCCESS};
 }}
 """
 
@@ -1058,6 +1098,14 @@ class RouteGlassItemDelegate(QtWidgets.QStyledItemDelegate):
         view.installEventFilter(self)
         view.viewport().installEventFilter(self)
 
+    def detach(self) -> None:
+        self._timer.stop()
+        for target in (self._view, self._view.viewport()):
+            try:
+                target.removeEventFilter(self)
+            except RuntimeError:
+                continue
+
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if watched is self._view:
             if event.type() == QtCore.QEvent.KeyPress:
@@ -1101,6 +1149,17 @@ class RouteGlassItemDelegate(QtWidgets.QStyledItemDelegate):
         painter.setPen(QtGui.QColor(text_color))
         painter.setFont(option.font)
         text_rect = QtCore.QRect(option.rect).adjusted(9, 0, -9, 0)
+        icon = index.data(QtCore.Qt.DecorationRole)
+        if isinstance(icon, QtGui.QIcon) and not icon.isNull():
+            icon_size = QtCore.QSize(30, 16)
+            icon_rect = QtCore.QRect(
+                text_rect.left(),
+                option.rect.top() + (option.rect.height() - icon_size.height()) // 2,
+                icon_size.width(),
+                icon_size.height(),
+            )
+            icon.paint(painter, icon_rect, QtCore.Qt.AlignCenter, QtGui.QIcon.Normal, QtGui.QIcon.On if selected else QtGui.QIcon.Off)
+            text_rect.setLeft(icon_rect.right() + 7)
         elided = option.fontMetrics.elidedText(text, QtCore.Qt.ElideMiddle, max(12, text_rect.width()))
         painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, elided)
         painter.restore()
@@ -1194,13 +1253,17 @@ class RouteGlassCombo(QtWidgets.QComboBox):
         view.viewport().setAttribute(QtCore.Qt.WA_StyledBackground, True)
         view.setStyleSheet(ROUTE_GLASS_POPUP_STYLE)
         self.setView(view)
-        view.setItemDelegate(RouteGlassItemDelegate(view))
+        self._popup_delegate = RouteGlassItemDelegate(view)
+        view.setItemDelegate(self._popup_delegate)
         self.setMaxVisibleItems(24)
         self._popup_animation_group: QtCore.QParallelAnimationGroup | None = None
         self._open_progress = 0.0
         self._open_progress_animation = QtCore.QPropertyAnimation(self, b"openProgress", self)
         self._open_progress_animation.setDuration(self.ARROW_ANIMATION_MS)
         self._open_progress_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._release_popup_delegate)
 
     @property
     def open_progress(self) -> float:
@@ -1311,6 +1374,15 @@ class RouteGlassCombo(QtWidgets.QComboBox):
         except RuntimeError:
             return
 
+    def _release_popup_delegate(self) -> None:
+        if self._popup_animation_group is not None:
+            self._popup_animation_group.stop()
+        self._open_progress_animation.stop()
+        delegate = getattr(self, "_popup_delegate", None)
+        if delegate is not None:
+            delegate.detach()
+            self._popup_delegate = None
+
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -1339,14 +1411,75 @@ class RouteGlassCombo(QtWidgets.QComboBox):
         painter.end()
 
 
+class ViewStyleCombo(RouteGlassCombo):
+    has_selected_preview = False
+    fixed_premium_width = 132
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumContentsLength(9)
+        self.setFixedSize(self.fixed_premium_width, 30)
+        self.setIconSize(QtCore.QSize(0, 0))
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing)
+        hover = self.underMouse() or self.hasFocus() or self._open_progress > 0.01
+
+        body = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        base = QtGui.QLinearGradient(body.topLeft(), body.bottomLeft())
+        base.setColorAt(0.0, QtGui.QColor("#070809" if hover else "#030405"))
+        base.setColorAt(0.50, QtGui.QColor("#010202"))
+        base.setColorAt(1.0, QtGui.QColor("#000000"))
+        painter.setBrush(base)
+        border = QtGui.QColor(108, 118, 128, 150 if hover else 84)
+        painter.setPen(QtGui.QPen(border, 1.0))
+        painter.drawRoundedRect(body, 8, 8)
+
+        if hover:
+            glow = QtGui.QColor(104, 217, 143, 22)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(glow)
+            painter.drawRoundedRect(body.adjusted(1.0, 1.0, -1.0, -1.0), 7, 7)
+
+        painter.setPen(QtGui.QColor("#ffffff" if hover else "#f4f6f5"))
+        painter.setFont(QtGui.QFont("Segoe UI", 8, QtGui.QFont.Black))
+        text_rect = body.adjusted(14, 0, -30, 0)
+        text = self.fontMetrics().elidedText(self.currentText(), QtCore.Qt.ElideRight, max(16, int(text_rect.width())))
+        painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+
+        arrow_x = self.width() - 15
+        arrow_y = self.height() / 2.0 + 1.0
+        arrow_alpha = int(132 + (72 * max(1.0 if self.hasFocus() else 0.0, self._open_progress, 0.78 if hover else 0.0)))
+        pen = QtGui.QPen(QtGui.QColor(230, 230, 230, arrow_alpha), 1.2)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.translate(QtCore.QPointF(arrow_x, arrow_y))
+        painter.rotate(180.0 * self._open_progress)
+        painter.translate(QtCore.QPointF(-arrow_x, -arrow_y))
+        painter.drawLine(QtCore.QPointF(arrow_x - 3.0, arrow_y - 2.0), QtCore.QPointF(arrow_x, arrow_y + 1.0))
+        painter.drawLine(QtCore.QPointF(arrow_x, arrow_y + 1.0), QtCore.QPointF(arrow_x + 3.0, arrow_y - 2.0))
+        painter.end()
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        popup = self.view().window()
+        if popup is not None:
+            width = max(self.width(), 132)
+            popup.setFixedWidth(width)
+            self.view().setFixedWidth(width)
+
+
 class SessionRenderToggle(QtWidgets.QPushButton):
     def __init__(self) -> None:
         super().__init__("Render")
         self.setObjectName("sessionRenderToggle")
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setMinimumHeight(46)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setMinimumHeight(38)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._rendering = False
         self._pulse_phase = 0.0
         self._pulse_timer = QtCore.QTimer(self)
@@ -1356,7 +1489,11 @@ class SessionRenderToggle(QtWidgets.QPushButton):
 
     def set_rendering(self, rendering: bool) -> None:
         rendering = bool(rendering)
-        if self._rendering == rendering:
+        if (
+            self._rendering == rendering
+            and self.isChecked() == rendering
+            and self.text() == ("Rendering" if rendering else "Render")
+        ):
             return
         self._rendering = rendering
         self.setChecked(rendering)
@@ -1382,19 +1519,19 @@ class SessionRenderToggle(QtWidgets.QPushButton):
 
         offset = 1.0 if down else (-1.0 if hover else 0.0)
         body = rect.adjusted(0, offset, 0, offset)
-        radius = min(12.0, body.height() / 2.8)
+        radius = min(10.0, body.height() / 3.0)
 
         base = QtGui.QLinearGradient(body.topLeft(), body.bottomLeft())
-        base.setColorAt(0.0, QtGui.QColor("#101010" if hover else "#080808"))
-        base.setColorAt(0.42, QtGui.QColor("#030303"))
+        base.setColorAt(0.0, QtGui.QColor("#0c0c0c" if hover else "#060606"))
+        base.setColorAt(0.48, QtGui.QColor("#020202"))
         base.setColorAt(1.0, QtGui.QColor("#000000"))
-        painter.setPen(QtGui.QPen(QtGui.QColor("#6c6c6c" if hover else "#303030"), 1))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#575757" if hover else "#282828"), 1))
         painter.setBrush(base)
         painter.drawRoundedRect(body, radius, radius)
 
         inset = QtGui.QLinearGradient(body.topLeft(), body.bottomLeft())
-        inset.setColorAt(0.0, QtGui.QColor(255, 255, 255, 42 if hover else 28))
-        inset.setColorAt(0.22, QtGui.QColor(255, 255, 255, 8))
+        inset.setColorAt(0.0, QtGui.QColor(255, 255, 255, 26 if hover else 16))
+        inset.setColorAt(0.26, QtGui.QColor(255, 255, 255, 5))
         inset.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(inset)
@@ -1402,16 +1539,16 @@ class SessionRenderToggle(QtWidgets.QPushButton):
 
         text_color = QtGui.QColor("#ffffff" if self._rendering else "#e7e7e7")
         painter.setPen(text_color)
-        painter.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold))
-        painter.drawText(body.adjusted(16, 0, -44, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.text())
+        painter.setFont(QtGui.QFont("Segoe UI", 9, QtGui.QFont.DemiBold))
+        painter.drawText(body.adjusted(14, 0, -36, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.text())
 
-        dot_center = QtCore.QPointF(body.right() - 21, body.center().y())
+        dot_center = QtCore.QPointF(body.right() - 18, body.center().y())
         if self._rendering:
             pulse = 0.5 + 0.5 * math.sin(self._pulse_phase)
-            halo = QtGui.QColor(104, 217, 143, int(26 + pulse * 42))
+            halo = QtGui.QColor(104, 217, 143, int(18 + pulse * 34))
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(halo)
-            painter.drawEllipse(dot_center, 7.0 + pulse * 1.8, 7.0 + pulse * 1.8)
+            painter.drawEllipse(dot_center, 6.0 + pulse * 1.5, 6.0 + pulse * 1.5)
             dot = QtGui.QColor("#68d98f")
             border = QtGui.QColor("#bfffd1")
         else:
@@ -1419,7 +1556,7 @@ class SessionRenderToggle(QtWidgets.QPushButton):
             border = QtGui.QColor(176, 106, 106, 150)
         painter.setPen(QtGui.QPen(border, 1))
         painter.setBrush(dot)
-        painter.drawEllipse(dot_center, 4.2, 4.2)
+        painter.drawEllipse(dot_center, 3.8, 3.8)
         painter.end()
 
 
@@ -1455,7 +1592,7 @@ class SpatialPage(QtWidgets.QWidget):
             phase,
             cursor=window.mapFromGlobal(QtGui.QCursor.pos()),
             lower_balance=True,
-            intensity=0.44,
+            intensity=VIEW_BACKDROP_INTENSITY,
             cinematic_depth=True,
             paint_bounds=paint_bounds,
         )
@@ -1499,13 +1636,20 @@ def apply_windows_window_icons(widget: QtWidgets.QWidget, icon_path: Path) -> li
         return []
 
 
-def destroy_windows_icon_handles(handles: list[int]) -> None:
+def destroy_windows_icon_handles(handles: list[int], widget: QtWidgets.QWidget | None = None) -> None:
     if sys.platform != "win32":
         return
     try:
         user32 = ctypes.windll.user32
         _configure_windows_icon_api(user32)
-        for handle in handles:
+        handles_to_destroy = set(handles)
+        if widget is not None and handles_to_destroy:
+            hwnd = int(widget.winId())
+            for icon_kind in (ICON_SMALL, ICON_BIG):
+                detached = int(user32.SendMessageW(hwnd, WM_SETICON, icon_kind, None) or 0)
+                if detached:
+                    handles_to_destroy.add(detached)
+        for handle in handles_to_destroy:
             if handle:
                 user32.DestroyIcon(handle)
     except Exception:
@@ -1553,7 +1697,7 @@ def paint_spatial_backdrop(
     spacing = 20 if not subtle else 22
     cursor_inside = cursor is not None and rect.contains(cursor)
     height = max(1, rect.height())
-    if not subtle:
+    if not subtle and not cinematic_depth:
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         for band in range(5):
@@ -2134,6 +2278,776 @@ class StereoSumMeter(QtWidgets.QWidget):
             painter.drawText(QtCore.QRectF(x - 17, bar.bottom() + self.TICK_LABEL_OFFSET, 34, 12), QtCore.Qt.AlignCenter, str(db))
 
 
+VIEW_REFERENCE_PALETTE = {
+    "bg": "#000000",
+    "panel": "#000000",
+    "line": "#343842",
+    "text": "#f5f7fb",
+    "muted": "#aeb5c1",
+    "accent": "#62a8ff",
+    "good": "#58d26d",
+    "warn": "#ffd166",
+    "bad": "#ff5d73",
+    "stop": "#7f8794",
+}
+
+VIEW_BACKDROP_INTENSITY = 0.52
+VIEW_SUM_METER_PEAK_YELLOW = (242, 190, 84)
+
+
+VIEW_916_NODES: tuple[tuple[str, str, float, float, str], ...] = (
+    ("C", "FC", 50.0, 16.0, ""),
+    ("L", "FL", 34.0, 20.0, ""),
+    ("R", "FR", 66.0, 20.0, ""),
+    ("Lw", "BL", 19.0, 35.0, ""),
+    ("Rw", "BR", 81.0, 35.0, ""),
+    ("Ls", "SL", 16.0, 50.0, ""),
+    ("Rs", "SR", 84.0, 50.0, ""),
+    ("Lrs", "BLC", 28.0, 76.0, ""),
+    ("Rrs", "BRC", 72.0, 76.0, ""),
+    ("Ltf", "TFL", 40.0, 33.0, "top"),
+    ("Rtf", "TFR", 60.0, 33.0, "top"),
+    ("Ltm", "TSL", 31.0, 50.0, "top"),
+    ("Rtm", "TSR", 69.0, 50.0, "top"),
+    ("Ltr", "TBL", 40.0, 67.0, "top"),
+    ("Rtr", "TBR", 60.0, 67.0, "top"),
+    ("LFE", "LFE", 50.0, 31.0, "lfe"),
+)
+
+
+VIEW_71_NODES: tuple[tuple[str, str, float, float, str], ...] = (
+    ("C", "FC", 50.0, 17.0, ""),
+    ("L", "FL", 34.0, 23.0, ""),
+    ("R", "FR", 66.0, 23.0, ""),
+    ("LFE", "LFE", 50.0, 36.0, "lfe"),
+    ("Ls", "SL", 23.0, 54.0, ""),
+    ("Rs", "SR", 77.0, 54.0, ""),
+    ("Lrs", "BL", 34.0, 79.0, ""),
+    ("Rrs", "BR", 66.0, 79.0, ""),
+)
+
+
+VIEW_LAYOUT_NODES = {
+    "windows_7_1": VIEW_71_NODES,
+    "sharur_9_1_6": VIEW_916_NODES,
+}
+
+VIEW_VISUALIZER_CLUSTER = "cluster"
+VIEW_VISUALIZER_CAPSULE = "capsule"
+VIEW_VISUALIZER_MODES: tuple[tuple[str, str], ...] = (
+    (VIEW_VISUALIZER_CLUSTER, "Spatial"),
+    (VIEW_VISUALIZER_CAPSULE, "Channels"),
+)
+
+CAPSULE_LAYOUT_ROWS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "windows_7_1": (
+        ("L", "R", "C", "LFE"),
+        ("Ls", "Rs", "Lrs", "Rrs"),
+    ),
+    "sharur_9_1_6": (
+        ("L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"),
+        ("Lw", "Rw", "Ltf", "Rtf", "Ltm", "Rtm", "Ltr", "Rtr"),
+    ),
+}
+
+
+VIEW_NODE_GROUP_COLORS = {
+    "FL": "#c06d4e",
+    "FR": "#c06d4e",
+    "FC": "#bbb55a",
+    "LFE": "#68c45d",
+    "BL": "#bea54a",
+    "BR": "#bea54a",
+    "BLC": "#b99668",
+    "BRC": "#b99668",
+    "SL": "#5f7fa5",
+    "SR": "#5f7fa5",
+    "TFL": "#5daee9",
+    "TFR": "#5daee9",
+    "TSL": "#73afd0",
+    "TSR": "#73afd0",
+    "TBL": "#63a7dd",
+    "TBR": "#63a7dd",
+}
+
+
+VIEW_METER_COLOR_STOPS: tuple[tuple[float, tuple[int, int, int]], ...] = (
+    (0.0, (74, 124, 255)),
+    (38.0, (103, 213, 255)),
+    (60.0, (111, 226, 108)),
+    (72.0, (199, 239, 102)),
+    (80.0, (255, 209, 102)),
+    (88.0, (255, 159, 90)),
+    (94.0, (255, 107, 99)),
+    (100.0, (255, 93, 115)),
+)
+
+VIEW_SUM_METER_COLOR_STOPS: tuple[tuple[float, tuple[int, int, int]], ...] = (
+    (0.0, (74, 124, 255)),
+    (38.0, (103, 213, 255)),
+    (60.0, (111, 226, 108)),
+    (72.0, (199, 239, 102)),
+    (80.0, (255, 209, 102)),
+    (88.0, (255, 198, 92)),
+    (94.0, VIEW_SUM_METER_PEAK_YELLOW),
+    (100.0, VIEW_SUM_METER_PEAK_YELLOW),
+)
+
+
+def _view_source_indices(config_id: str) -> dict[str, int]:
+    layout = CHANNEL_LAYOUTS[config_id]
+    names = tuple(str(name) for name in layout["names"])
+    indices = tuple(int(index) for index in layout["indices"])
+    return dict(zip(names, indices))
+
+
+def _view_level_to_db(value: float) -> float:
+    try:
+        level = abs(float(value))
+    except (TypeError, ValueError):
+        return float("-inf")
+    if not math.isfinite(level) or level <= 0.0:
+        return float("-inf")
+    return max(BedInputVisualizer.METER_FLOOR_DB, 20.0 * math.log10(level))
+
+
+def _view_meter_fraction(db: float) -> float:
+    if not math.isfinite(db):
+        return 0.0
+    if db >= 0.0:
+        return 1.0
+    if db <= BedInputVisualizer.METER_FLOOR_DB:
+        return 0.0
+    return (db - BedInputVisualizer.METER_FLOOR_DB) / (0.0 - BedInputVisualizer.METER_FLOOR_DB)
+
+
+def _view_interpolated_color(
+    percent: float,
+    alpha: int = 255,
+    stops: tuple[tuple[float, tuple[int, int, int]], ...] = VIEW_METER_COLOR_STOPS,
+) -> QtGui.QColor | None:
+    p = max(0.0, min(100.0, float(percent)))
+    for index in range(1, len(stops)):
+        stop_a, color_a = stops[index - 1]
+        stop_b, color_b = stops[index]
+        if p <= stop_b:
+            span = max(0.0001, stop_b - stop_a)
+            mix = (p - stop_a) / span
+            channels = [round(color_a[channel] + (color_b[channel] - color_a[channel]) * mix) for channel in range(3)]
+            return QtGui.QColor(channels[0], channels[1], channels[2], alpha)
+    r, g, b = stops[-1][1]
+    return QtGui.QColor(r, g, b, alpha)
+
+
+def _view_color_for_db(db: float, alpha: int = 255) -> QtGui.QColor | None:
+    if not math.isfinite(db) or db <= BedInputVisualizer.METER_FLOOR_DB:
+        return None
+    return _view_interpolated_color(_view_meter_fraction(db) * 100.0, alpha)
+
+
+def _view_sum_meter_color_for_db(db: float, alpha: int = 255) -> QtGui.QColor | None:
+    if not math.isfinite(db) or db <= BedInputVisualizer.METER_FLOOR_DB:
+        return None
+    return _view_interpolated_color(_view_meter_fraction(db) * 100.0, alpha, VIEW_SUM_METER_COLOR_STOPS)
+
+
+def _view_mix_colors(base: QtGui.QColor, overlay: QtGui.QColor, amount: float, alpha: int | None = None) -> QtGui.QColor:
+    mix = max(0.0, min(1.0, float(amount)))
+    color = QtGui.QColor(
+        round(base.red() + (overlay.red() - base.red()) * mix),
+        round(base.green() + (overlay.green() - base.green()) * mix),
+        round(base.blue() + (overlay.blue() - base.blue()) * mix),
+        base.alpha() if alpha is None else alpha,
+    )
+    return color
+
+
+def _view_oled_signal_color(color: QtGui.QColor, amount: float = 0.82, alpha: int | None = None) -> QtGui.QColor:
+    return _view_mix_colors(QtGui.QColor("#010203"), color, amount, color.alpha() if alpha is None else alpha)
+
+
+def _view_node_color(source_name: str, db: float, alpha: int = 255) -> QtGui.QColor:
+    base = QtGui.QColor(VIEW_NODE_GROUP_COLORS.get(source_name, "#8fb7d7"))
+    if not math.isfinite(db):
+        base.setAlpha(alpha)
+        return base
+    level_color = _view_color_for_db(round(db * 2.0) / 2.0)
+    if level_color is None:
+        base.setAlpha(alpha)
+        return base
+    intensity = _view_meter_fraction(db)
+    mix = 0.08 + 0.22 * intensity
+    if source_name in {"TFL", "TFR", "TBL", "TBR"}:
+        mix = 0.05 + 0.18 * intensity
+    elif source_name in {"SL", "SR", "TSL", "TSR"}:
+        mix = 0.07 + 0.20 * intensity
+    elif source_name == "LFE":
+        mix = 0.10 + 0.22 * intensity
+    return _view_mix_colors(base, level_color, min(0.30, mix), alpha)
+
+
+def _view_capsule_palette_for_db(
+    source_name: str,
+    db: float,
+) -> tuple[QtGui.QColor, QtGui.QColor, QtGui.QColor, QtGui.QColor, QtGui.QColor] | None:
+    if not math.isfinite(db) or db <= BedInputVisualizer.METER_FLOOR_DB:
+        return None
+    render_db = round(db / BedInputVisualizer.INPUT_RENDER_BUCKET_DB) * BedInputVisualizer.INPUT_RENDER_BUCKET_DB
+    signal = _view_oled_signal_color(_view_node_color(source_name, render_db), 0.90)
+    drive = _view_capsule_drive_for_db(render_db)
+    base = QtGui.QColor(VIEW_NODE_GROUP_COLORS.get(source_name, "#8fb7d7"))
+
+    top = _view_mix_colors(QtGui.QColor("#090c10"), signal, 0.13 + 0.39 * drive, round(124 + 104 * drive))
+    middle = _view_mix_colors(QtGui.QColor("#020405"), signal, 0.08 + 0.52 * drive, round(112 + 116 * drive))
+    bottom = _view_mix_colors(QtGui.QColor("#000000"), signal, 0.03 + 0.31 * drive, round(98 + 108 * drive))
+    border = _view_mix_colors(_view_oled_signal_color(base, 0.82), signal, 0.38 + 0.38 * drive, round(86 + 138 * drive))
+    inner_glow = QtGui.QColor(signal)
+    inner_glow.setAlpha(round(5 + 92 * drive))
+    return top, middle, bottom, border, inner_glow
+
+
+def _view_capsule_drive_for_db(db: float) -> float:
+    if not math.isfinite(db) or db <= BedInputVisualizer.VISUAL_IDLE_DB:
+        return 0.0
+    span = 0.0 - BedInputVisualizer.VISUAL_IDLE_DB
+    normalized = (db - BedInputVisualizer.VISUAL_IDLE_DB) / span
+    return max(0.0, min(1.0, normalized)) ** 0.62
+
+
+class BedInputVisualizer(QtWidgets.QWidget):
+    METER_FLOOR_DB = -160.0
+    VISUAL_IDLE_DB = -118.0
+    NODE_VISUAL_IDLE_DB = METER_FLOOR_DB
+    INPUT_RENDER_BUCKET_DB = 0.5
+    SUM_METER_TICK_STEP_DB = 10
+    SUM_METER_LABEL_STEP_DB = 20
+    METER_PEAK_HOLD_SECONDS = 0.008
+    METER_RELEASE_DB_PER_SECOND = 45.0
+    CLIP_HOLD_SECONDS = 1.2
+    ACTIVE_THRESHOLD = 1.0e-4
+
+    def __init__(self, config_id: str = DEFAULT_CHANNEL_CONFIG) -> None:
+        super().__init__()
+        self.setObjectName("bedInputVisualizer")
+        self.setMinimumSize(760, 560)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.channel_config = DEFAULT_CHANNEL_CONFIG
+        self.nodes: tuple[dict[str, object], ...] = ()
+        self.node_levels = [0.0] * 16
+        self.node_display_db = [float("-inf")] * 16
+        self.node_hold_until = [0.0] * 16
+        self.set_channel_config(config_id)
+        self.left_level = 0.0
+        self.right_level = 0.0
+        self.left_display_db = float("-inf")
+        self.right_display_db = float("-inf")
+        self.left_hold_until = 0.0
+        self.right_hold_until = 0.0
+        self.left_clip_until = 0.0
+        self.right_clip_until = 0.0
+        self._last_update = monotonic()
+        self._motion_phase = 0.0
+
+    def set_channel_config(self, config_id: str) -> None:
+        normalized = config_id if config_id in VIEW_LAYOUT_NODES else DEFAULT_CHANNEL_CONFIG
+        source_indices = _view_source_indices(normalized)
+        self.nodes = tuple(
+            {
+                "label": label,
+                "source_name": source_name,
+                "source_index": source_indices[source_name],
+                "x": x,
+                "y": y,
+                "kind": kind,
+            }
+            for label, source_name, x, y, kind in VIEW_LAYOUT_NODES[normalized]
+        )
+        self.channel_config = normalized
+        self.update()
+
+    @property
+    def active_labels(self) -> tuple[str, ...]:
+        return tuple(
+            str(node["label"])
+            for node in self.nodes
+            if self.node_levels[int(node["source_index"])] > self.ACTIVE_THRESHOLD
+        )
+
+    @property
+    def left_clipping(self) -> bool:
+        return monotonic() < self.left_clip_until
+
+    @property
+    def right_clipping(self) -> bool:
+        return monotonic() < self.right_clip_until
+
+    @property
+    def active_node_count(self) -> int:
+        return sum(1 for node in self.nodes if self.node_levels[int(node["source_index"])] > self.ACTIVE_THRESHOLD)
+
+    def set_levels(
+        self,
+        channel_levels: object,
+        left_meter: float,
+        right_meter: float,
+        clipping: bool = False,
+    ) -> None:
+        now = monotonic()
+        dt = max(0.0, min(0.08, now - self._last_update))
+        self._last_update = now
+        self._motion_phase = (self._motion_phase + 0.35 + dt * 5.0) % math.tau
+
+        for node in self.nodes:
+            source_index = int(node["source_index"])
+            level = self._level_at(channel_levels, source_index)
+            self.node_levels[source_index] = level
+            target_db = _view_level_to_db(level)
+            display_db = self._step_display_db(
+                self.node_display_db[source_index],
+                target_db,
+                self.node_hold_until[source_index],
+                now,
+                dt,
+            )
+            if math.isfinite(target_db) and (not math.isfinite(display_db) or target_db >= display_db):
+                self.node_hold_until[source_index] = now + self.METER_PEAK_HOLD_SECONDS
+            self.node_display_db[source_index] = display_db
+
+        self.left_level = max(0.0, float(left_meter or 0.0))
+        self.right_level = max(0.0, float(right_meter or 0.0))
+        self.left_display_db = self._step_sum_display_db(self.left_display_db, _view_level_to_db(self.left_level), "left", now, dt)
+        self.right_display_db = self._step_sum_display_db(self.right_display_db, _view_level_to_db(self.right_level), "right", now, dt)
+        if self.left_level >= 0.9995:
+            self.left_clip_until = now + self.CLIP_HOLD_SECONDS
+        if self.right_level >= 0.9995:
+            self.right_clip_until = now + self.CLIP_HOLD_SECONDS
+        self.update()
+
+    @staticmethod
+    def _level_at(levels: object, source_index: int) -> float:
+        try:
+            if source_index < len(levels):  # type: ignore[arg-type]
+                return max(0.0, float(levels[source_index]))  # type: ignore[index]
+        except Exception:
+            return 0.0
+        return 0.0
+
+    def _step_sum_display_db(self, current: float, target: float, side: str, now: float, dt: float) -> float:
+        hold_until = self.left_hold_until if side == "left" else self.right_hold_until
+        stepped = self._step_display_db(current, target, hold_until, now, dt)
+        if math.isfinite(target) and (not math.isfinite(current) or target >= current):
+            if side == "left":
+                self.left_hold_until = now + self.METER_PEAK_HOLD_SECONDS
+            else:
+                self.right_hold_until = now + self.METER_PEAK_HOLD_SECONDS
+        return stepped
+
+    def _step_display_db(self, current: float, target: float, hold_until: float, now: float, dt: float) -> float:
+        if math.isfinite(target) and (not math.isfinite(current) or target >= current):
+            return target
+        if now < hold_until:
+            return current
+        if not math.isfinite(current):
+            return target if math.isfinite(target) else float("-inf")
+        release_target = target if math.isfinite(target) else self.METER_FLOOR_DB
+        value = max(release_target, current - self.METER_RELEASE_DB_PER_SECOND * dt)
+        if value <= self.METER_FLOOR_DB + 0.05 and not math.isfinite(target):
+            return float("-inf")
+        return value
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = QtCore.QRectF(self.rect())
+        painter.setClipRect(event.rect())
+
+        content = rect.adjusted(18, 8, -18, -18)
+        if content.width() <= 1 or content.height() <= 1:
+            painter.end()
+            return
+
+        stage, left_meter, right_meter = self._layout_rects(content)
+        self._draw_stage_glow(painter, stage)
+        self._draw_sum_meter(painter, left_meter, "L sum", self.left_display_db, self.left_clipping)
+        self._draw_sum_meter(painter, right_meter, "R sum", self.right_display_db, self.right_clipping)
+        self._draw_listener(painter, stage)
+        for node in self.nodes:
+            self._draw_node(painter, stage, node)
+        painter.end()
+
+    def _layout_rects(self, content: QtCore.QRectF) -> tuple[QtCore.QRectF, QtCore.QRectF, QtCore.QRectF]:
+        meter_width = 108.0
+        gap = max(34.0, min(78.0, content.width() * 0.055))
+        stage_width = min(content.width() - (meter_width + gap) * 2.0, content.height() * 1.14, 860.0)
+        if stage_width < 290.0:
+            meter_width = max(76.0, min(96.0, content.width() * 0.12))
+            gap = max(16.0, min(34.0, content.width() * 0.035))
+            stage_width = min(content.width() - (meter_width + gap) * 2.0, content.height() * 1.06, 620.0)
+        stage_width = max(250.0, stage_width)
+        stage_height = min(content.height() * 0.92, stage_width * 0.88)
+        stage_width = min(stage_width, stage_height / 0.88)
+        center = content.center()
+        stage = QtCore.QRectF(center.x() - stage_width / 2.0, center.y() - stage_height / 2.0, stage_width, stage_height)
+
+        track_height = min(420.0, max(210.0, content.height() * 0.68))
+        meter_height = track_height + 56.0
+        meter_top = center.y() - meter_height / 2.0
+        left = QtCore.QRectF(stage.left() - gap - meter_width, meter_top, meter_width, meter_height)
+        right = QtCore.QRectF(stage.right() + gap, meter_top, meter_width, meter_height)
+        return stage, left, right
+
+    def _draw_header(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+        painter.setPen(QtGui.QColor(VIEW_REFERENCE_PALETTE["text"]))
+        painter.setFont(QtGui.QFont("Segoe UI", 7, QtGui.QFont.Black))
+        painter.drawText(QtCore.QRectF(rect.left() + 18, rect.top() + 10, rect.width() - 36, 18), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, "9.1.6 activity, stereo sum output")
+        painter.restore()
+
+    def _draw_stage_glow(self, painter: QtGui.QPainter, stage: QtCore.QRectF) -> None:
+        painter.save()
+        glow = QtGui.QRadialGradient(stage.center(), max(stage.width(), stage.height()) * 0.54)
+        glow.setColorAt(0.0, QtGui.QColor(103, 213, 255, 3))
+        glow.setColorAt(0.45, QtGui.QColor(216, 223, 236, 1))
+        glow.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(stage.center(), stage.width() * 0.50, stage.height() * 0.46)
+        painter.restore()
+
+    def _draw_listener(self, painter: QtGui.QPainter, stage: QtCore.QRectF) -> None:
+        center = stage.center()
+        radius = max(21.0, min(32.0, stage.width() * 0.042))
+        painter.save()
+        painter.setPen(QtGui.QPen(QtGui.QColor(216, 223, 236, 56), 1.0))
+        painter.setBrush(QtGui.QColor("#060606"))
+        painter.drawEllipse(center, radius, radius)
+
+        icon_color = QtGui.QColor(216, 223, 236, 232)
+        soft_color = QtGui.QColor(216, 223, 236, 184)
+        scale = radius / 32.0
+        head_w = 18.0 * scale
+        head_h = 22.0 * scale
+        head_rect = QtCore.QRectF(center.x() - head_w / 2.0, center.y() - 15.0 * scale, head_w, head_h)
+        skull_pen = QtGui.QPen(icon_color, max(1.2, 2.0 * scale))
+        skull_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(skull_pen)
+        skull_fill = QtGui.QRadialGradient(head_rect.center(), head_h * 0.62)
+        skull_fill.setColorAt(0.0, QtGui.QColor(255, 255, 255, 24))
+        skull_fill.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+        painter.setBrush(skull_fill)
+        painter.drawRoundedRect(head_rect, head_w * 0.50, head_h * 0.44)
+
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(soft_color)
+        ear_w = max(2.8, 4.0 * scale)
+        ear_h = max(5.6, 8.0 * scale)
+        painter.drawRoundedRect(
+            QtCore.QRectF(center.x() - head_w / 2.0 - 5.0 * scale, center.y() - 6.0 * scale, ear_w, ear_h),
+            ear_w / 2.0,
+            ear_w / 2.0,
+        )
+        painter.drawRoundedRect(
+            QtCore.QRectF(center.x() + head_w / 2.0 + 1.0 * scale, center.y() - 6.0 * scale, ear_w, ear_h),
+            ear_w / 2.0,
+            ear_w / 2.0,
+        )
+
+        nose = QtGui.QPolygonF(
+            [
+                QtCore.QPointF(center.x() - 4.0 * scale, center.y() + 5.5 * scale),
+                QtCore.QPointF(center.x() + 4.0 * scale, center.y() + 5.5 * scale),
+                QtCore.QPointF(center.x(), center.y() + 13.5 * scale),
+            ]
+        )
+        painter.setBrush(QtGui.QColor(216, 223, 236, 176))
+        painter.drawPolygon(nose)
+        painter.restore()
+
+    def _draw_node(self, painter: QtGui.QPainter, stage: QtCore.QRectF, node: dict[str, object]) -> None:
+        label = str(node["label"])
+        source_index = int(node["source_index"])
+        kind = str(node["kind"])
+        point = QtCore.QPointF(
+            stage.left() + float(node["x"]) * 0.01 * stage.width(),
+            stage.top() + float(node["y"]) * 0.01 * stage.height(),
+        )
+        db = self.node_display_db[source_index]
+        active = math.isfinite(db) and db > self.NODE_VISUAL_IDLE_DB
+        source_name = str(node["source_name"])
+        group_color = QtGui.QColor(VIEW_NODE_GROUP_COLORS.get(source_name, "#8fb7d7"))
+        render_db = round(db / self.INPUT_RENDER_BUCKET_DB) * self.INPUT_RENDER_BUCKET_DB if math.isfinite(db) else db
+        signal_color = _view_node_color(source_name, render_db)
+        base_size = max(29.0, min(44.0, stage.width() * 0.052))
+        if kind == "top":
+            size = base_size * 0.86
+        elif kind == "lfe":
+            size = base_size
+        else:
+            size = base_size
+        rect = QtCore.QRectF(point.x() - size / 2.0, point.y() - size / 2.0, size, size)
+
+        painter.save()
+        if active:
+            intensity = _view_meter_fraction(render_db)
+            signal_color = _view_oled_signal_color(signal_color, 0.88)
+            glow = QtGui.QColor(signal_color)
+            glow.setAlpha(round(50 * intensity))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(point, size * (0.53 + 0.16 * intensity), size * (0.53 + 0.16 * intensity))
+            fill = QtGui.QColor(signal_color)
+            fill.setAlpha(96)
+            border = QtGui.QColor(signal_color)
+            border.setAlpha(210)
+            painter.setBrush(fill)
+            pen = QtGui.QPen(border, 1.0)
+        else:
+            fill = QtGui.QColor("#0b0c0e" if kind == "top" else ("#111214" if kind == "lfe" else "#121316"))
+            border = QtGui.QColor(group_color)
+            border.setAlpha(172 if kind == "top" else 150)
+            painter.setBrush(fill)
+            pen = QtGui.QPen(border, 1.0)
+
+        if kind == "top":
+            pen.setStyle(QtCore.Qt.DashLine)
+            pen.setDashPattern([3.0, 3.0])
+        painter.setPen(pen)
+
+        if kind == "lfe":
+            painter.drawRoundedRect(rect, min(12.0, size * 0.28), min(12.0, size * 0.28))
+        else:
+            painter.drawEllipse(rect)
+
+        painter.setPen(QtGui.QColor("#ffffff" if active else VIEW_REFERENCE_PALETTE["text"]))
+        font_size = max(7, min(10, int(size * (0.25 if len(label) <= 3 else 0.21))))
+        painter.setFont(QtGui.QFont("Segoe UI", font_size, QtGui.QFont.Black))
+        painter.drawText(rect.adjusted(2, 0, -2, 0), QtCore.Qt.AlignCenter, label)
+        painter.restore()
+
+    def _draw_sum_meter(self, painter: QtGui.QPainter, rect: QtCore.QRectF, title: str, db: float, clipping: bool) -> None:
+        painter.save()
+        painter.setPen(QtGui.QColor(VIEW_REFERENCE_PALETTE["text"]))
+        painter.setFont(QtGui.QFont("Segoe UI", 8, QtGui.QFont.Black))
+        header = QtCore.QRectF(rect.left(), rect.top(), rect.width(), 22)
+        painter.drawText(header.adjusted(0, 0, -48, 0), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, title)
+
+        clip_center = QtCore.QPointF(header.right() - 34, header.center().y())
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 93, 115, 204) if clipping else QtGui.QColor(216, 223, 236, 66), 1.0))
+        painter.setBrush(QtGui.QColor(255, 93, 115, 255) if clipping else QtGui.QColor("#15171b"))
+        painter.drawEllipse(clip_center, 3.5, 3.5)
+        painter.setPen(QtGui.QColor("#ffdbe1" if clipping else "#59616d"))
+        painter.setFont(QtGui.QFont("Segoe UI", 6, QtGui.QFont.Black))
+        painter.drawText(QtCore.QRectF(clip_center.x() + 8, header.top(), 34, header.height()), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, "CLIP")
+
+        track_height = rect.height() - 56.0
+        track = QtCore.QRectF(rect.left() + 12.0, rect.top() + 36.0, 30.0, track_height)
+        active = math.isfinite(db) and db > self.VISUAL_IDLE_DB
+        full_scale = math.isfinite(db) and db >= -0.05
+        render_db = 0.0 if full_scale else (round(db * 2.0) / 2.0 if math.isfinite(db) else db)
+        meter_color = _view_sum_meter_color_for_db(render_db)
+        if not active or meter_color is None:
+            meter_color = QtGui.QColor("#323640")
+        else:
+            meter_color = _view_oled_signal_color(meter_color, 0.82 if not full_scale else 0.88)
+        border_color = QtGui.QColor(meter_color)
+        border_color.setAlpha(224 if full_scale else (204 if active else 92))
+        if active:
+            aura = QtGui.QColor(meter_color)
+            aura.setAlpha(round(9 + 22 * _view_meter_fraction(db)))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(aura)
+            painter.drawRoundedRect(track.adjusted(-2.0, -2.0, 2.0, 2.0), 10, 10)
+        painter.setPen(QtGui.QPen(border_color, 1.0))
+        painter.setBrush(QtGui.QColor("#000000"))
+        painter.drawRoundedRect(track, 8, 8)
+
+        fraction = _view_meter_fraction(db)
+        if active and fraction > 0.001:
+            fill = QtCore.QRectF(track.left() + 1.0, track.bottom() - (track.height() - 2.0) * fraction, track.width() - 2.0, (track.height() - 2.0) * fraction)
+            fill_color = QtGui.QColor(meter_color)
+            fill_color.setAlpha(160 if full_scale else round(78 + 58 * fraction))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(fill, 6, 6)
+
+            shine = QtGui.QLinearGradient(fill.topLeft(), fill.topRight())
+            shine.setColorAt(0.0, QtGui.QColor(255, 255, 255, 17))
+            shine.setColorAt(0.48, QtGui.QColor(255, 255, 255, 3))
+            shine.setColorAt(1.0, QtGui.QColor(0, 0, 0, 24))
+            painter.setBrush(shine)
+            painter.drawRoundedRect(fill, 6, 6)
+
+        scale_left = track.right() + 18.0
+        painter.setFont(QtGui.QFont("Segoe UI", 6, QtGui.QFont.Black))
+        for tick in range(0, int(abs(self.METER_FLOOR_DB)) + self.SUM_METER_TICK_STEP_DB, self.SUM_METER_TICK_STEP_DB):
+            tick_db = -tick
+            pos = (0.0 - tick_db) / (0.0 - self.METER_FLOOR_DB)
+            y = track.top() + track.height() * pos
+            major = tick_db == 0 or tick_db == int(self.METER_FLOOR_DB) or abs(tick_db) % self.SUM_METER_LABEL_STEP_DB == 0
+            painter.setPen(QtGui.QPen(QtGui.QColor(216, 223, 236, 118 if major else 46), 1.0))
+            tick_len = 10.0 if major else 5.0
+            painter.drawLine(QtCore.QPointF(scale_left - tick_len - 3.0, y), QtCore.QPointF(scale_left - 3.0, y))
+            if major:
+                painter.setPen(QtGui.QColor("#d2d8e2" if tick_db == 0 else "#b8c0cc"))
+                label = "0" if tick_db == 0 else str(tick_db)
+                label_rect = QtCore.QRectF(scale_left, y - 6.0, 46.0, 12.0)
+                if tick_db == 0:
+                    label_rect.moveTop(y)
+                elif tick_db == int(self.METER_FLOOR_DB):
+                    label_rect.moveTop(y - 12.0)
+                painter.drawText(label_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, label)
+        painter.restore()
+
+
+class CapsuleInputVisualizer(BedInputVisualizer):
+    CAPSULE_WIDTH = 76.0
+    CAPSULE_HEIGHT = 42.0
+    CAPSULE_GAP = 10.0
+    ROW_GAP = 13.0
+
+    def __init__(self, config_id: str = DEFAULT_CHANNEL_CONFIG) -> None:
+        super().__init__(config_id)
+        self.setObjectName("capsuleInputVisualizer")
+
+    @property
+    def capsule_rows(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return CAPSULE_LAYOUT_ROWS.get(self.channel_config, CAPSULE_LAYOUT_ROWS[DEFAULT_CHANNEL_CONFIG])
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing)
+        rect = QtCore.QRectF(self.rect())
+        painter.setClipRect(event.rect())
+
+        content = rect.adjusted(18, 8, -18, -18)
+        if content.width() <= 1 or content.height() <= 1:
+            painter.end()
+            return
+
+        stage, left_meter, right_meter = self._layout_rects(content)
+        self._draw_sum_meter(painter, left_meter, "L sum", self.left_display_db, self.left_clipping)
+        self._draw_sum_meter(painter, right_meter, "R sum", self.right_display_db, self.right_clipping)
+        self._draw_capsule_stage(painter, stage)
+        painter.end()
+
+    def _draw_capsule_stage(self, painter: QtGui.QPainter, stage: QtCore.QRectF) -> None:
+        painter.save()
+        node_by_label = {str(node["label"]): node for node in self.nodes}
+        rows = self.capsule_rows
+        block_height = self.CAPSULE_HEIGHT * 2.0 + self.ROW_GAP
+        y = stage.center().y() - block_height / 2.0
+        for row_index, row_labels in enumerate(rows):
+            self._draw_capsule_row(
+                painter,
+                stage,
+                y + row_index * (self.CAPSULE_HEIGHT + self.ROW_GAP),
+                row_labels,
+                node_by_label,
+            )
+        painter.restore()
+
+    def _draw_capsule_row(
+        self,
+        painter: QtGui.QPainter,
+        stage: QtCore.QRectF,
+        y: float,
+        row_labels: tuple[str, ...],
+        node_by_label: dict[str, dict[str, object]],
+    ) -> None:
+        count = max(1, len(row_labels))
+        total_width = self.CAPSULE_WIDTH * count + self.CAPSULE_GAP * (count - 1)
+        x = stage.center().x() - total_width / 2.0
+        for label in row_labels:
+            node = node_by_label.get(label)
+            rect = QtCore.QRectF(x, y, self.CAPSULE_WIDTH, self.CAPSULE_HEIGHT)
+            self._draw_capsule(painter, rect, label, node)
+            x += self.CAPSULE_WIDTH + self.CAPSULE_GAP
+
+    def _draw_capsule(
+        self,
+        painter: QtGui.QPainter,
+        rect: QtCore.QRectF,
+        label: str,
+        node: dict[str, object] | None,
+    ) -> None:
+        source_index = int(node["source_index"]) if node is not None else -1
+        source_name = str(node["source_name"]) if node is not None else ""
+        db = self.node_display_db[source_index] if 0 <= source_index < len(self.node_display_db) else float("-inf")
+        active = math.isfinite(db) and db > self.VISUAL_IDLE_DB
+        intensity = _view_meter_fraction(db)
+        render_db = round(db / self.INPUT_RENDER_BUCKET_DB) * self.INPUT_RENDER_BUCKET_DB if math.isfinite(db) else db
+        capsule_palette = _view_capsule_palette_for_db(source_name, render_db)
+        motion = 0.5 + 0.5 * math.sin(self._motion_phase + max(0, source_index) * 0.61 + intensity * 5.0)
+
+        painter.save()
+        radius = 10.0
+        shadow = QtGui.QColor(0, 0, 0, 180)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(rect.adjusted(0.0, 6.0, 0.0, 8.0), radius + 1.0, radius + 1.0)
+
+        capsule_path = QtGui.QPainterPath()
+        capsule_path.addRoundedRect(rect, radius, radius)
+
+        if active and capsule_palette is not None:
+            fill_top, fill_mid, fill_bottom, border, inner_glow = capsule_palette
+            fill = QtGui.QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            fill.setColorAt(0.0, fill_top)
+            fill.setColorAt(0.52, fill_mid)
+            fill.setColorAt(1.0, fill_bottom)
+            text = QtGui.QColor("#f7fbff")
+        else:
+            fill = QtGui.QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            fill.setColorAt(0.0, QtGui.QColor("#07090b"))
+            fill.setColorAt(0.50, QtGui.QColor("#020303"))
+            fill.setColorAt(1.0, QtGui.QColor("#000000"))
+            border = QtGui.QColor(66, 73, 82, 150)
+            text = QtGui.QColor("#c8ced8")
+
+        painter.setBrush(fill)
+        painter.setPen(QtGui.QPen(border, 1.0))
+        painter.drawPath(capsule_path)
+
+        if active and capsule_palette is not None:
+            painter.save()
+            painter.setClipPath(capsule_path)
+            inner_glow = QtGui.QColor(inner_glow)
+            inner_glow.setAlpha(round(inner_glow.alpha() * (0.78 + 0.22 * motion)))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(inner_glow)
+            painter.drawRoundedRect(rect.adjusted(1.2, 1.2, -1.2, -1.2), radius - 1.0, radius - 1.0)
+
+            drive = _view_capsule_drive_for_db(render_db)
+            energy = QtGui.QLinearGradient(rect.topLeft(), rect.topRight())
+            energy.setColorAt(0.0, QtGui.QColor(inner_glow.red(), inner_glow.green(), inner_glow.blue(), round(8 + 66 * drive)))
+            energy.setColorAt(0.58, QtGui.QColor(inner_glow.red(), inner_glow.green(), inner_glow.blue(), round(4 + 32 * drive)))
+            energy.setColorAt(1.0, QtGui.QColor(inner_glow.red(), inner_glow.green(), inner_glow.blue(), 0))
+            painter.setBrush(energy)
+            energy_width = rect.width() * (0.30 + 0.70 * drive)
+            energy_rect = QtCore.QRectF(
+                rect.left() + 2.2,
+                rect.top() + 2.2,
+                max(8.0, energy_width - 4.4),
+                rect.height() - 4.4,
+            )
+            painter.drawRoundedRect(energy_rect, radius - 2.0, radius - 2.0)
+
+            shine = QtGui.QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            shine.setColorAt(0.0, QtGui.QColor(255, 255, 255, 17))
+            shine.setColorAt(0.24, QtGui.QColor(255, 255, 255, 4))
+            shine.setColorAt(1.0, QtGui.QColor(0, 0, 0, 15))
+            painter.setBrush(shine)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius - 1, radius - 1)
+            painter.restore()
+
+        painter.setPen(text)
+        painter.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Black))
+        painter.drawText(rect.adjusted(3, 0, -3, 0), QtCore.Qt.AlignCenter, label)
+        painter.restore()
+
+
 class ChannelTile(QtWidgets.QWidget):
     USES_INSTANT_METERING = False
     METER_ATTACK = 0.60
@@ -2209,8 +3123,8 @@ class ChannelTile(QtWidgets.QWidget):
 
 class RawChannelTile(QtWidgets.QWidget):
     USES_INSTANT_METERING = False
-    METER_ATTACK = 0.58
-    METER_DECAY = 0.12
+    METER_ATTACK = 0.78
+    METER_DECAY = 0.18
 
     def __init__(self, name: str, source_index: int) -> None:
         super().__init__()
@@ -2774,6 +3688,54 @@ class RawMonitorDialog(DotBackdropDialog):
             tile.set_levels(peak, rms)
 
 
+class DiagnosticsDialog(DotBackdropDialog):
+    KEYS = ("Preset", "Route", "Channels", "Layout", "Stream", "Limiter", "Enhancer", "Upmix", "Active", "Output")
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Diagnostics")
+        self.setWindowFlags(
+            QtCore.Qt.Window
+            | QtCore.Qt.WindowTitleHint
+            | QtCore.Qt.WindowSystemMenuHint
+            | QtCore.Qt.WindowMinimizeButtonHint
+            | QtCore.Qt.WindowCloseButtonHint
+        )
+        self.setWindowModality(QtCore.Qt.NonModal)
+        self.setMinimumSize(700, 336)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        layout.addWidget(section_label("Diagnostics"))
+
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(5)
+        self.diag_labels: dict[str, QtWidgets.QLabel] = {}
+        for row, key in enumerate(self.KEYS):
+            name = QtWidgets.QLabel(key)
+            name.setStyleSheet(f"color:{DIM}; background-color:#000000; padding:5px 0px;")
+            value = value_label()
+            value.setStyleSheet(
+                f"color:{TEXT}; font-family:Consolas, monospace; font-size:11px; "
+                "background-color:#000000; padding:5px 0px;"
+            )
+            value.setWordWrap(True)
+            value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            self.diag_labels[key] = value
+            grid.addWidget(name, row, 0)
+            grid.addWidget(value, row, 1)
+        layout.addWidget(card(grid), 1)
+
+    def set_values(self, values: dict[str, str]) -> None:
+        for key, value in values.items():
+            label = self.diag_labels.get(key)
+            if label is not None and label.text() != value:
+                label.setText(value)
+
+
 class RouteProbeWorker(QtCore.QObject):
     finished = QtCore.pyqtSignal(object, str)
     failed = QtCore.pyqtSignal(str)
@@ -2811,21 +3773,43 @@ class DeviceRefreshWorker(QtCore.QObject):
 
 DETAIL_SECTIONS = (
     (
-        "Important Details",
+        "Renderer Details",
         (
             (
-                "Sound Enhancer",
-                "Sound Enhancer increases loudness for quiet laptop speakers while protecting against clipping. "
-                "It does not resample or intentionally degrade audio, but very loud tracks may be gently limited for safety.",
+                "ULTRA Mode",
+                "Shared WASAPI low-latency streaming with native callback-thread MMCSS, three-period buffering, "
+                "sample-rate-aware period scaling, and automatic RAW fallback if an endpoint rejects the Ultra hint.",
             ),
-            ("Smart Switching", "Matches the active Windows output to a saved profile when the output device changes."),
-            ("User / Global PEQ", "Lets you shape the overall tonal balance with your own parametric EQ."),
-            ("L-R Correction", "Corrects or aligns left and right channel balance for the selected output."),
-            ("Keep Output Awake", "Keeps the selected output endpoint open with silence while rendering is stopped."),
-            ("GitHub", "Visit GitHub to download the latest releases, and star the repo if the app is useful."),
+            (
+                "Sound Enhancer",
+                "Optional post-mix loudness support. It keeps routing and downmix math unchanged, "
+                "then uses protected limiting when a track is already near full scale.",
+            ),
+            (
+                "Upmix",
+                "7.1 Upmix is a conservative surround fill helper, not a full creative cinematic upmix. "
+                "9.1.6 Upmix adds controlled side/rear/height ambience from real surround energy or stereo width.",
+            ),
+            (
+                "System Automation",
+                "Smart Switching follows the active Windows output, Auto-start manages the current Startup shortcut, "
+                "and Keep Output Awake holds the selected endpoint open with silence only while rendering is stopped.",
+            ),
+            (
+                "PEQ / Correction",
+                "User / Global PEQ shapes overall tone. L-R Correction and swap adjust the selected output pair without "
+                "changing the renderer matrix.",
+            ),
+            (
+                "GitHub",
+                "Open the project page for releases, source, issue history, and build notes.",
+            ),
         ),
     ),
 )
+
+DETAIL_NAME_WIDTH = 150
+DETAIL_TEXT_WIDTH = 512
 
 
 def build_details_body() -> QtWidgets.QWidget:
@@ -2838,33 +3822,33 @@ def build_details_body() -> QtWidgets.QWidget:
 
     for title, rows in DETAIL_SECTIONS:
         section = QtWidgets.QVBoxLayout()
-        section.setContentsMargins(13, 12, 13, 13)
+        section.setContentsMargins(14, 14, 14, 14)
         section.setSpacing(8)
         section.addWidget(section_label(title))
 
         for name, detail in rows:
             row_widget = QtWidgets.QWidget()
             row_widget.setObjectName("detailsRow")
-            row_widget.setMinimumHeight(26)
+            row_widget.setMinimumHeight(42)
             row_widget.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
             row_layout = QtWidgets.QHBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(16)
+            row_layout.setSpacing(14)
 
             name_label = QtWidgets.QLabel(name)
             name_label.setObjectName("detailsName")
-            name_label.setFixedWidth(158)
-            name_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            name_label.setMinimumHeight(24)
+            name_label.setFixedWidth(DETAIL_NAME_WIDTH)
+            name_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            name_label.setMinimumHeight(32)
             name_label.setStyleSheet(f"color:{TEXT}; font-weight:650; background-color: transparent; padding: 0px;")
 
             detail_label = QtWidgets.QLabel(detail)
             detail_label.setObjectName("detailsDescription")
             detail_label.setWordWrap(True)
-            detail_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            detail_label.setFixedWidth(488)
+            detail_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            detail_label.setFixedWidth(DETAIL_TEXT_WIDTH)
             detail_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
-            detail_label.setMinimumHeight(24)
+            detail_label.setMinimumHeight(32)
             detail_label.setStyleSheet(f"color:{MID}; font-size:11px; background-color: transparent; padding: 0px;")
 
             row_layout.addWidget(name_label, 0)
@@ -2886,8 +3870,7 @@ class RendererWindow(QtWidgets.QWidget):
         super().__init__()
         self.setObjectName("rendererRoot")
         self.setWindowTitle(APP_DISPLAY_NAME)
-        self.setMinimumSize(1120, 925)
-        self.resize(1212, self.minimumHeight())
+        self.setFixedSize(APP_DEFAULT_WINDOW_SIZE)
         self.setStyleSheet(BASE_STYLE)
         self._windows_icon_handles: list[int] = []
         self._set_icon()
@@ -2927,6 +3910,9 @@ class RendererWindow(QtWidgets.QWidget):
         self.channel_config = str(self.settings.get("channel_config") or DEFAULT_CHANNEL_CONFIG)
         if self.channel_config not in CHANNEL_LAYOUTS:
             self.channel_config = DEFAULT_CHANNEL_CONFIG
+        self.view_visualizer_mode = str(self.settings.get("view_visualizer_mode") or VIEW_VISUALIZER_CLUSTER)
+        if self.view_visualizer_mode not in {mode for mode, _label in VIEW_VISUALIZER_MODES}:
+            self.view_visualizer_mode = VIEW_VISUALIZER_CLUSTER
         self.engine.processor.set_monitor_layout(self.channel_config)
         self._restoring = False
         self._last_default_output_id: int | None = None
@@ -2943,6 +3929,9 @@ class RendererWindow(QtWidgets.QWidget):
         self._app_root = Path(__file__).resolve().parents[1]
         self._device_poll_count = 0
         self.raw_monitor_dialog: RawMonitorDialog | None = None
+        self.diagnostics_dialog: DiagnosticsDialog | None = None
+        self.diag_labels = self._create_diagnostic_labels()
+        self.tiles: list[ChannelTile] = []
         self._probe_thread: QtCore.QThread | None = None
         self._probe_worker: RouteProbeWorker | None = None
         self._probe_restore_running = False
@@ -2984,13 +3973,15 @@ class RendererWindow(QtWidgets.QWidget):
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setObjectName("mainTabs")
-        self.tabs.addTab(self._build_main_tab(), "Renderer")
-        self.tabs.addTab(self._build_presets_tab(), "Presets")
+        self.tabs.addTab(self._build_view_tab(), "View")
+        self.tabs.addTab(self._build_advanced_tab(), "Advanced")
         self.tabs.tabBar().setFixedHeight(56)
         self.tabs.tabBar().setDrawBase(False)
         self.tabs.setCornerWidget(self._build_header_controls(), QtCore.Qt.TopRightCorner)
         shell.addWidget(self.tabs, 1)
         root.addWidget(content)
+
+        self._set_status("Standby", "neutral")
 
         self._apply_launch_preset()
         self._sync_input_device_presentation()
@@ -3021,6 +4012,22 @@ class RendererWindow(QtWidgets.QWidget):
             self._startup_device_error = f"{type(exc).__name__}: {exc}"
             return []
 
+    @staticmethod
+    def _create_diagnostic_labels() -> dict[str, QtWidgets.QLabel]:
+        labels: dict[str, QtWidgets.QLabel] = {}
+        for key in DiagnosticsDialog.KEYS:
+            label = value_label()
+            label.hide()
+            labels[key] = label
+        return labels
+
+    def _diagnostic_values(self) -> dict[str, str]:
+        return {key: label.text() for key, label in self.diag_labels.items()}
+
+    def _sync_diagnostics_dialog_labels(self) -> None:
+        if self.diagnostics_dialog is not None and self.diagnostics_dialog.isVisible():
+            self.diagnostics_dialog.set_values(self._diagnostic_values())
+
     def _sync_visual_performance(self, rendering: bool) -> None:
         rendering = bool(rendering)
         room_interval = self.AUDIO_SAFE_ROOM_INTERVAL_MS if rendering else self.IDLE_ROOM_INTERVAL_MS
@@ -3034,7 +4041,7 @@ class RendererWindow(QtWidgets.QWidget):
         if not self.isVisible() or self.isMinimized():
             return
         self._backdrop_phase = (self._backdrop_phase + 0.022) % math.tau
-        page = self.findChild(QtWidgets.QWidget, "mainPage")
+        page = self._visible_spatial_page()
         if page is not None and page.isVisible():
             page.update()
             page_rect = QtCore.QRect(page.mapTo(self, QtCore.QPoint(0, 0)), page.size())
@@ -3048,7 +4055,7 @@ class RendererWindow(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         paint_region = QtGui.QRegion(event.rect().intersected(self.rect()))
-        page = self.findChild(QtWidgets.QWidget, "mainPage")
+        page = self._visible_spatial_page()
         if page is not None and page.isVisible():
             page_rect = QtCore.QRect(page.mapTo(self, QtCore.QPoint(0, 0)), page.size())
             paint_region -= QtGui.QRegion(page_rect)
@@ -3061,9 +4068,20 @@ class RendererWindow(QtWidgets.QWidget):
                 self._backdrop_phase,
                 cursor=cursor,
                 lower_balance=True,
+                intensity=VIEW_BACKDROP_INTENSITY,
+                cinematic_depth=True,
                 paint_bounds=paint_bounds,
             )
         painter.end()
+
+    def _visible_spatial_page(self) -> QtWidgets.QWidget | None:
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:
+            return None
+        page = tabs.currentWidget()
+        if isinstance(page, SpatialPage):
+            return page
+        return None
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -3084,6 +4102,7 @@ class RendererWindow(QtWidgets.QWidget):
                     timer.stop()
             self._persist_state(was_running=self.engine.snapshot().running)
             self._close_raw_monitor_dialog()
+            self._close_diagnostics_dialog()
             self.engine.close()
             self._animate_opacity(self.windowOpacity(), 0.0, 130, QtCore.QEasingCurve.InCubic, self.close)
             return
@@ -3091,7 +4110,7 @@ class RendererWindow(QtWidgets.QWidget):
             event.ignore()
             QtCore.QTimer.singleShot(80, self.close)
             return
-        destroy_windows_icon_handles(self._windows_icon_handles)
+        destroy_windows_icon_handles(self._windows_icon_handles, self)
         self._windows_icon_handles = []
         super().closeEvent(event)
 
@@ -3201,6 +4220,245 @@ class RendererWindow(QtWidgets.QWidget):
         painter.end()
         return pixmap
 
+    def _build_view_tab(self) -> QtWidgets.QWidget:
+        tab = SpatialPage()
+        tab.setObjectName("viewPage")
+        root = QtWidgets.QVBoxLayout(tab)
+        root.setContentsMargins(8, 2, 8, 8)
+        root.setSpacing(6)
+
+        route_card = self._build_route_card()
+        route_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        root.addWidget(route_card, 0)
+
+        mode_row = QtWidgets.QWidget()
+        mode_row.setObjectName("viewModeRow")
+        mode_row.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        mode_layout = QtWidgets.QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(0, 0, 2, 0)
+        mode_layout.setSpacing(8)
+        mode_layout.addStretch(1)
+        mode_layout.addWidget(self._build_view_mode_buttons(), 0, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        mode_layout.addWidget(self._build_view_profile_selector(), 0, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        mode_layout.addWidget(self._build_view_visualizer_selector(), 0, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        root.addWidget(mode_row, 0)
+
+        self.bed_input_visualizer = BedInputVisualizer(self.channel_config)
+        self.capsule_input_visualizer = CapsuleInputVisualizer(self.channel_config)
+        self.visualizer_stack = QtWidgets.QStackedWidget()
+        self.visualizer_stack.setObjectName("visualizerStack")
+        self.visualizer_stack.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.visualizer_stack.addWidget(self.bed_input_visualizer)
+        self.visualizer_stack.addWidget(self.capsule_input_visualizer)
+        root.addWidget(self.visualizer_stack, 1)
+        self._sync_view_visualizer_mode(persist=False)
+        return tab
+
+    def _build_view_mode_buttons(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        container.setObjectName("viewModeGroup")
+        container.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.mode_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for config_id, label in (("windows_7_1", "7.1"), ("sharur_9_1_6", "9.1.6")):
+            button = QtWidgets.QPushButton(label)
+            button.setObjectName("viewModeButton")
+            button.setProperty("active", config_id == self.channel_config)
+            button.setFixedSize(78, 28)
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False, cid=config_id: self.set_channel_config(cid))
+            self.mode_buttons[config_id] = button
+            layout.addWidget(button)
+        return container
+
+    def _build_view_visualizer_selector(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        container.setObjectName("viewStyleSelector")
+        container.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        container.setFixedSize(ViewStyleCombo.fixed_premium_width, 30)
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.view_visualizer_combo = ViewStyleCombo()
+        self.view_visualizer_combo.setObjectName("routeGlassCombo")
+        self.view_visualizer_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        for mode, label in VIEW_VISUALIZER_MODES:
+            self.view_visualizer_combo.addItem(label, mode)
+        self._set_combo_data(self.view_visualizer_combo, self.view_visualizer_mode)
+        layout.addWidget(self.view_visualizer_combo)
+        return container
+
+    def _build_view_profile_selector(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        container.setObjectName("viewProfileSelector")
+        container.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        container.setFixedSize(ViewStyleCombo.fixed_premium_width, 30)
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.view_profile_combo = ViewStyleCombo()
+        self.view_profile_combo.setObjectName("routeGlassCombo")
+        self.view_profile_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        layout.addWidget(self.view_profile_combo)
+        self._sync_view_profile_combo()
+        return container
+
+    def update_view_visualizer_mode(self) -> None:
+        combo = getattr(self, "view_visualizer_combo", None)
+        mode = str(combo.currentData() if combo is not None else self.view_visualizer_mode)
+        if mode not in {mode_id for mode_id, _label in VIEW_VISUALIZER_MODES}:
+            mode = VIEW_VISUALIZER_CLUSTER
+        if self.view_visualizer_mode == mode:
+            self._sync_view_visualizer_mode(persist=False)
+            return
+        self.view_visualizer_mode = mode
+        self._sync_view_visualizer_mode(persist=True)
+
+    def _sync_view_visualizer_mode(self, persist: bool = False) -> None:
+        mode = self.view_visualizer_mode
+        if mode not in {mode_id for mode_id, _label in VIEW_VISUALIZER_MODES}:
+            mode = VIEW_VISUALIZER_CLUSTER
+            self.view_visualizer_mode = mode
+        combo = getattr(self, "view_visualizer_combo", None)
+        if combo is not None and combo.currentData() != mode:
+            combo.blockSignals(True)
+            self._set_combo_data(combo, mode)
+            combo.blockSignals(False)
+        stack = getattr(self, "visualizer_stack", None)
+        if stack is not None:
+            target = self.capsule_input_visualizer if mode == VIEW_VISUALIZER_CAPSULE else self.bed_input_visualizer
+            if stack.currentWidget() is not target:
+                stack.setCurrentWidget(target)
+        if persist and not self._restoring:
+            self._persist_state(was_running=self.engine.snapshot().running)
+
+    def _build_advanced_tab(self) -> QtWidgets.QWidget:
+        tab = SpatialPage()
+        tab.setObjectName("advancedPage")
+        root = QtWidgets.QVBoxLayout(tab)
+        root.setContentsMargins(8, 2, 8, 8)
+        root.setSpacing(0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.viewport().setObjectName("transparentViewport")
+        scroll.viewport().setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        body = QtWidgets.QWidget()
+        body.setObjectName("advancedBody")
+        layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 4, 6)
+        layout.setSpacing(10)
+
+        top_row_widget = QtWidgets.QWidget()
+        top_row_widget.setObjectName("advancedTopRow")
+        top_row_widget.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        top_row = QtWidgets.QHBoxLayout(top_row_widget)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(10)
+
+        controls_card = self._build_advanced_controls_card()
+        controls_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        top_row.addWidget(controls_card, 4)
+
+        automation_card = self._build_system_automation_card()
+        automation_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        top_row.addWidget(automation_card, 4)
+
+        profile_manager = self._build_profile_manager_card()
+        profile_manager.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        top_row.addWidget(profile_manager, 4)
+
+        diagnostics = self._build_diagnostics_card()
+        diagnostics.setMinimumWidth(230)
+        diagnostics.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        top_row.addWidget(diagnostics, 3)
+        layout.addWidget(top_row_widget)
+
+        peq_card = self._build_peq_routing_card()
+        self.peq_routing_card = peq_card
+        peq_card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        layout.addWidget(peq_card, 1)
+        layout.setAlignment(QtCore.Qt.AlignTop)
+
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+        self._rebuild_preset_buttons()
+        return tab
+
+    def _build_advanced_controls_card(self) -> QtWidgets.QFrame:
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        layout.addWidget(section_label("Audio Controls"))
+
+        self.preamp_value = value_label()
+        self.preamp_slider = self._slider(-20, 0)
+        self.preamp_slider.setObjectName("preampSlider")
+        self.preamp_slider.setMinimumHeight(26)
+        self.preamp_value.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.preamp_value.setMinimumWidth(40)
+
+        slider_grid = QtWidgets.QGridLayout()
+        slider_grid.setHorizontalSpacing(10)
+        slider_grid.setVerticalSpacing(4)
+        slider_grid.addWidget(QtWidgets.QLabel("Preamp"), 0, 0)
+        slider_grid.addWidget(self.preamp_slider, 0, 1)
+        slider_grid.addWidget(self.preamp_value, 0, 2)
+        slider_grid.setColumnStretch(1, 1)
+        layout.addLayout(slider_grid)
+
+        self.surround_fill_checkbox = SwitchCheckBox("7.1 Upmix")
+        self.surround_fill_checkbox.setChecked(self.surround_fill_enabled)
+        self.upmix916_checkbox = SwitchCheckBox("9.1.6 Upmix")
+        self.upmix916_checkbox.setChecked(self.upmix_9_1_6_enabled)
+        self.sound_enhancer_checkbox = SwitchCheckBox("Sound Enhancer")
+        self.sound_enhancer_checkbox.setChecked(self.sound_enhancer_enabled)
+        self.sound_enhancer_checkbox.setToolTip("Adds protected post-mix loudness when enabled")
+
+        upmix_grid = QtWidgets.QGridLayout()
+        upmix_grid.setHorizontalSpacing(12)
+        upmix_grid.setVerticalSpacing(5)
+        for checkbox in (self.surround_fill_checkbox, self.upmix916_checkbox, self.sound_enhancer_checkbox):
+            checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        upmix_grid.addWidget(self.surround_fill_checkbox, 0, 0)
+        upmix_grid.addWidget(self.upmix916_checkbox, 0, 1)
+        upmix_grid.addWidget(self.sound_enhancer_checkbox, 1, 0, 1, 2)
+        layout.addLayout(upmix_grid)
+
+        frame = card(layout)
+        frame.setMinimumHeight(164)
+        frame.setMaximumHeight(174)
+        return frame
+
+    def _build_system_automation_card(self) -> QtWidgets.QFrame:
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        layout.addWidget(section_label("System Automation"))
+
+        self.smart_switch_checkbox = SwitchCheckBox("Smart Switching")
+        self.smart_switch_checkbox.setChecked(bool(self.settings.get("smart_switch_enabled", True)))
+        self.system_boot_checkbox = SwitchCheckBox("Auto-start on Boot")
+        self.system_boot_checkbox.setChecked(bool(self.settings.get("system_boot_autostart", False)))
+        self.keep_awake_checkbox = SwitchCheckBox("Keep output awake")
+        self.keep_awake_checkbox.setChecked(self.keep_output_awake_enabled)
+        for checkbox in (self.smart_switch_checkbox, self.system_boot_checkbox, self.keep_awake_checkbox):
+            checkbox.setMinimumHeight(28)
+            checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            layout.addWidget(checkbox)
+
+        frame = card(layout)
+        frame.setMinimumHeight(164)
+        frame.setMaximumHeight(174)
+        return frame
+
     def _build_main_tab(self) -> QtWidgets.QWidget:
         tab = SpatialPage()
         tab.setObjectName("mainPage")
@@ -3298,71 +4556,88 @@ class RendererWindow(QtWidgets.QWidget):
         self._rebuild_preset_buttons()
         return tab
 
+    def _build_route_style_segment(
+        self,
+        label: QtWidgets.QLabel,
+        control: QtWidgets.QWidget,
+        height: int = 44,
+        minimum_width: int = 0,
+        fixed_width: bool = False,
+        label_width: int = 88,
+    ) -> QtWidgets.QFrame:
+        segment = QtWidgets.QFrame()
+        segment.setObjectName("routeSegment")
+        horizontal_policy = QtWidgets.QSizePolicy.Fixed if fixed_width else QtWidgets.QSizePolicy.Ignored
+        segment.setSizePolicy(horizontal_policy, QtWidgets.QSizePolicy.Fixed)
+        segment.setFixedHeight(height)
+        if minimum_width:
+            segment.setMinimumWidth(minimum_width)
+            if fixed_width:
+                segment.setFixedWidth(minimum_width)
+                control.setMinimumWidth(0)
+            else:
+                control.setMinimumWidth(minimum_width)
+        segment_layout = QtWidgets.QHBoxLayout(segment)
+        segment_layout.setContentsMargins(12, 0, 10, 0)
+        segment_layout.setSpacing(8)
+        label.setObjectName("routeEyebrow")
+        label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        label.setFixedWidth(label_width)
+        label.setFixedHeight(height)
+        label.setFont(QtGui.QFont("Segoe UI", 8, QtGui.QFont.DemiBold))
+        control.setFixedHeight(height)
+        control.setMinimumHeight(height)
+        control.setMaximumHeight(height)
+        control.setSizePolicy(horizontal_policy, QtWidgets.QSizePolicy.Fixed)
+        segment_layout.addWidget(label, 0)
+        segment_layout.addWidget(control, 1)
+        return segment
+
     def _build_profile_manager_card(self) -> QtWidgets.QFrame:
-        layout = QtWidgets.QHBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(12)
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(7)
+        layout.addWidget(section_label("Profiles"))
 
-        profile_column = QtWidgets.QVBoxLayout()
-        profile_column.setSpacing(7)
-        profile_column.addWidget(section_label("Saved Profiles"))
-
-        preset_scroller = QtWidgets.QScrollArea()
-        preset_scroller.setObjectName("profileListScroll")
-        preset_scroller.setWidgetResizable(True)
-        preset_scroller.setFrameShape(QtWidgets.QFrame.NoFrame)
-        preset_scroller.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        preset_scroller.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        preset_scroller.viewport().setObjectName("transparentViewport")
-        preset_scroller.viewport().setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        preset_scroller.setMinimumHeight(78)
-        preset_scroller.setMaximumHeight(86)
-        preset_scroller.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-
-        preset_container = QtWidgets.QWidget()
-        preset_container.setObjectName("presetListContainer")
-        self.preset_grid_columns = 3
-        self.preset_buttons_layout = QtWidgets.QGridLayout(preset_container)
-        self.preset_buttons_layout.setContentsMargins(0, 0, 4, 0)
-        self.preset_buttons_layout.setHorizontalSpacing(7)
-        self.preset_buttons_layout.setVerticalSpacing(7)
-        preset_scroller.setWidget(preset_container)
-        profile_column.addWidget(preset_scroller)
-        layout.addLayout(profile_column, 5)
-
-        control_column = QtWidgets.QVBoxLayout()
-        control_column.setSpacing(7)
-        control_column.addWidget(section_label("Profile Control"))
+        self.profile_preset_combo = RouteGlassCombo()
+        self.profile_preset_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.profile_preset_combo.setMinimumContentsLength(18)
+        profile_label = QtWidgets.QLabel("Profile")
+        layout.addWidget(self._build_route_style_segment(profile_label, self.profile_preset_combo, label_width=70))
 
         self.preset_name_edit = QtWidgets.QLineEdit()
         self.preset_name_edit.setObjectName("profileNameInput")
-        self.preset_name_edit.setPlaceholderText("Profile name")
-        self.preset_name_edit.setMinimumHeight(36)
-        control_column.addWidget(self.preset_name_edit)
+        self.preset_name_edit.setPlaceholderText("New or renamed profile")
+        self.preset_name_edit.setMinimumHeight(32)
+        self.preset_name_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        layout.addWidget(self.preset_name_edit)
 
-        actions_widget = QtWidgets.QWidget()
-        actions_widget.setObjectName("profileActions")
-        actions = QtWidgets.QHBoxLayout(actions_widget)
+        actions_row = QtWidgets.QWidget()
+        actions_row.setObjectName("profileActionRow")
+        actions_row.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        actions = QtWidgets.QHBoxLayout(actions_row)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(7)
+
         self.new_preset_button = QtWidgets.QPushButton("New")
         self.save_preset_button = QtWidgets.QPushButton("Update")
         self.delete_preset_button = QtWidgets.QPushButton("Delete")
         for button in (self.new_preset_button, self.save_preset_button, self.delete_preset_button):
             button.setObjectName("profileAction")
-            button.setMinimumHeight(34)
+            button.setFixedHeight(34)
+            button.setMinimumWidth(0)
             button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-            actions.addWidget(button)
-        control_column.addWidget(actions_widget)
-        control_column.addStretch(1)
-        layout.addLayout(control_column, 3)
+            actions.addWidget(button, 1)
+        layout.addWidget(actions_row)
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("profileManagerCard")
         frame.setProperty("presetSurface", True)
         frame.setLayout(layout)
-        frame.setMinimumHeight(126)
-        frame.setMaximumHeight(146)
+        frame.setMinimumWidth(320)
+        frame.setMinimumHeight(164)
+        frame.setMaximumHeight(174)
         return frame
 
     def _build_peq_routing_card(self) -> QtWidgets.QFrame:
@@ -3395,7 +4670,7 @@ class RendererWindow(QtWidgets.QWidget):
         self.channel_trim_panel = self._build_trim_panel()
         self.channel_trim_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for panel in (self.lr_swap_panel, self.channel_trim_panel):
-            panel.setFixedHeight(103)
+            panel.setFixedHeight(102)
         route_row.addWidget(self.channel_trim_panel, 1)
         layout.addLayout(route_row)
 
@@ -3472,8 +4747,8 @@ class RendererWindow(QtWidgets.QWidget):
         )
         trim_helper.setObjectName("peqHelper")
         trim_helper.setWordWrap(True)
+        panel_layout.addSpacing(0)
         panel_layout.addWidget(trim_helper)
-        panel_layout.addStretch(1)
         return self._peq_panel(panel_layout)
 
     def _build_peq_editor_panel(self, title: str, kind: str) -> QtWidgets.QFrame:
@@ -3599,9 +4874,9 @@ class RendererWindow(QtWidgets.QWidget):
         device_box_height = 44
         sample_rate_value_width = 100
         sample_rate_segment_width = sample_rate_value_width + 118
-        layout = QtWidgets.QHBoxLayout()
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+        route_row = QtWidgets.QHBoxLayout()
+        route_row.setContentsMargins(10, 8, 10, 8)
+        route_row.setSpacing(8)
 
         self.input_combo = QtWidgets.QComboBox()
         self.input_combo.setObjectName("fixedInputSelector")
@@ -3646,6 +4921,10 @@ class RendererWindow(QtWidgets.QWidget):
         self.refresh_devices_button.setFixedWidth(48)
         self.refresh_devices_button.setFixedHeight(device_box_height)
         self.refresh_devices_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.render_toggle_button = SessionRenderToggle()
+        self.render_toggle_button.setFixedWidth(176)
+        self.render_toggle_button.setFixedHeight(device_box_height)
+        self.render_toggle_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
         def route_segment(
             label: QtWidgets.QLabel,
@@ -3679,9 +4958,9 @@ class RendererWindow(QtWidgets.QWidget):
             segment_layout.addWidget(control, 1)
             return segment
 
-        layout.addWidget(route_segment(input_label, self.input_fixed_label), 1)
-        layout.addWidget(route_segment(output_label, self.output_combo), 1)
-        layout.addWidget(
+        route_row.addWidget(route_segment(input_label, self.input_fixed_label), 1)
+        route_row.addWidget(route_segment(output_label, self.output_combo), 1)
+        route_row.addWidget(
             route_segment(
                 sample_rate_label,
                 self.sample_rate_combo,
@@ -3691,18 +4970,19 @@ class RendererWindow(QtWidgets.QWidget):
             ),
             0,
         )
-        layout.addWidget(self.refresh_devices_button, 0)
+        route_row.addWidget(self.render_toggle_button, 0)
+        route_row.addWidget(self.refresh_devices_button, 0)
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("routeLane")
-        frame.setLayout(layout)
+        frame.setLayout(route_row)
         return frame
 
     def _build_volume_card(self) -> QtWidgets.QFrame:
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(12, 11, 12, 12)
         layout.setSpacing(9)
-        layout.addWidget(section_label("Gain / Monitor"))
+        layout.addWidget(section_label("Gain / Upmix"))
 
         self.preamp_value = value_label()
         self.preamp_slider = self._slider(-20, 0)
@@ -3721,21 +5001,6 @@ class RendererWindow(QtWidgets.QWidget):
         layout.addLayout(slider_grid)
         layout.addSpacing(4)
 
-        mode_row = QtWidgets.QHBoxLayout()
-        mode_row.setSpacing(8)
-        self.mode_buttons: dict[str, QtWidgets.QPushButton] = {}
-        for config_id, config in CHANNEL_LAYOUTS.items():
-            button = QtWidgets.QPushButton(str(config["label"]))
-            button.setObjectName("mode")
-            button.setProperty("active", config_id == self.channel_config)
-            button.setMinimumHeight(36)
-            button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-            button.clicked.connect(lambda checked=False, cid=config_id: self.set_channel_config(cid))
-            self.mode_buttons[config_id] = button
-            mode_row.addWidget(button)
-        layout.addLayout(mode_row)
-        layout.addSpacing(2)
-
         self.surround_fill_checkbox = SwitchCheckBox("7.1 Upmix")
         self.surround_fill_checkbox.setChecked(self.surround_fill_enabled)
 
@@ -3744,7 +5009,7 @@ class RendererWindow(QtWidgets.QWidget):
 
         self.sound_enhancer_checkbox = SwitchCheckBox("Sound Enhancer")
         self.sound_enhancer_checkbox.setChecked(self.sound_enhancer_enabled)
-        self.sound_enhancer_checkbox.setToolTip("Boost laptop-speaker loudness with protected limiting")
+        self.sound_enhancer_checkbox.setToolTip("Adds protected post-mix loudness when enabled")
 
         for checkbox in (self.surround_fill_checkbox, self.upmix916_checkbox, self.sound_enhancer_checkbox):
             checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
@@ -3756,6 +5021,25 @@ class RendererWindow(QtWidgets.QWidget):
         toggle_grid.addWidget(self.upmix916_checkbox, 0, 1)
         toggle_grid.addWidget(self.sound_enhancer_checkbox, 1, 0, 1, 2)
         layout.addLayout(toggle_grid)
+        return card(layout)
+
+    def _build_automation_card(self) -> QtWidgets.QFrame:
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 11, 12, 12)
+        layout.setSpacing(9)
+        layout.addWidget(section_label("Automation"))
+
+        self.smart_switch_checkbox = SwitchCheckBox("Smart Switching")
+        self.smart_switch_checkbox.setChecked(bool(self.settings.get("smart_switch_enabled", True)))
+        self.system_boot_checkbox = SwitchCheckBox("Auto-start on Boot")
+        self.system_boot_checkbox.setChecked(bool(self.settings.get("system_boot_autostart", False)))
+        self.keep_awake_checkbox = SwitchCheckBox("Keep output awake")
+        self.keep_awake_checkbox.setChecked(self.keep_output_awake_enabled)
+        for checkbox in (self.smart_switch_checkbox, self.system_boot_checkbox, self.keep_awake_checkbox):
+            checkbox.setMinimumHeight(28)
+            checkbox.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            layout.addWidget(checkbox)
+        layout.addStretch(1)
         return card(layout)
 
     def _build_transport_card(self) -> QtWidgets.QFrame:
@@ -3849,45 +5133,33 @@ class RendererWindow(QtWidgets.QWidget):
         return frame
 
     def _build_diagnostics_card(self) -> QtWidgets.QFrame:
-        layout = QtWidgets.QGridLayout()
-        layout.setContentsMargins(14, 13, 14, 14)
-        layout.setHorizontalSpacing(14)
-        layout.setVerticalSpacing(7)
-        layout.addWidget(section_label("Diagnostics"), 0, 0, 1, 2)
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(7)
 
-        self.diag_labels: dict[str, QtWidgets.QLabel] = {}
-        keys = ("Preset", "Route", "Channels", "Layout", "Stream", "Limiter", "Enhancer", "Upmix", "Active", "Output")
-        for row, key in enumerate(keys, start=1):
-            name = QtWidgets.QLabel(key)
-            name.setStyleSheet(f"color:{DIM}; background-color:#000000; padding:7px 0px;")
-            value = value_label()
-            value.setStyleSheet(
-                f"color:{TEXT}; font-family:Consolas, monospace; font-size:11px; "
-                "background-color:#000000; padding:7px 0px;"
-            )
-            value.setWordWrap(True)
-            value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-            self.diag_labels[key] = value
-            layout.addWidget(name, row, 0)
-            layout.addWidget(value, row, 1)
-
-        tools = QtWidgets.QHBoxLayout()
-        tools.setSpacing(8)
+        self.diagnostics_button = QtWidgets.QPushButton("Diagnostics")
         self.raw_monitor_button = QtWidgets.QPushButton("Raw Monitor")
-        for button in (self.raw_monitor_button,):
-            button.setObjectName("rawMonitor")
-            button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        tools.addWidget(self.raw_monitor_button)
-        layout.addLayout(tools, len(keys) + 1, 0, 1, 2)
-        return card(layout)
+        for button, name in ((self.diagnostics_button, "diagnosticsLaunch"), (self.raw_monitor_button, "rawMonitor")):
+            button.setObjectName(name)
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            layout.addWidget(button)
+        frame = card(layout)
+        frame.setMinimumHeight(164)
+        frame.setMaximumHeight(174)
+        return frame
 
     def _wire_events(self) -> None:
         self.info_button.clicked.connect(self.show_feature_help)
         self.github_button.clicked.connect(self.open_github)
         self.render_toggle_button.clicked.connect(self._toggle_render_session)
+        self.view_visualizer_combo.currentIndexChanged.connect(lambda _index: self.update_view_visualizer_mode())
+        self.view_profile_combo.activated[int].connect(self._select_view_profile_from_combo)
+        self.profile_preset_combo.activated[int].connect(self._select_preset_from_combo)
         self.new_preset_button.clicked.connect(self.create_preset)
         self.save_preset_button.clicked.connect(self.save_active_preset)
         self.delete_preset_button.clicked.connect(self.delete_active_preset)
+        self.diagnostics_button.clicked.connect(self.open_diagnostics)
         self.raw_monitor_button.clicked.connect(self.open_raw_monitor)
         self.refresh_devices_button.clicked.connect(self._refresh_devices_from_button)
         self.surround_fill_checkbox.toggled.connect(self.update_surround_fill)
@@ -3928,7 +5200,15 @@ class RendererWindow(QtWidgets.QWidget):
         layout.addWidget(heading)
 
         body = build_details_body()
-        layout.addWidget(body, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("rendererDetailsScroll")
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidgetResizable(False)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setWidget(body)
+        scroll.setFixedSize(body.sizeHint().width() + 10, min(302, body.sizeHint().height()))
+        layout.addWidget(scroll, 0)
         dialog.adjustSize()
         dialog.setFixedSize(dialog.sizeHint())
         dialog.exec_()
@@ -3968,9 +5248,81 @@ class RendererWindow(QtWidgets.QWidget):
             return f"{device.name} ({channels}ch in)"
         return device.name
 
+    def _select_preset_from_combo(self, index: int) -> None:
+        combo = getattr(self, "profile_preset_combo", None)
+        if combo is None or self._restoring:
+            return
+        preset_id = combo.itemData(index)
+        if not preset_id or preset_id == self.active_preset_id:
+            return
+        self.apply_preset(str(preset_id), start_after=True, manual=True)
+
+    def _select_view_profile_from_combo(self, index: int) -> None:
+        combo = getattr(self, "view_profile_combo", None)
+        if combo is None or self._restoring:
+            return
+        preset_id = combo.itemData(index)
+        if not preset_id or preset_id == self.active_preset_id:
+            return
+        self.apply_preset(str(preset_id), start_after=True, manual=True)
+
+    def _sync_profile_preset_combo(self) -> None:
+        combo = getattr(self, "profile_preset_combo", None)
+        if combo is None:
+            return
+        blocker = QtCore.QSignalBlocker(combo)
+        combo.clear()
+        active_index = -1
+        for index, preset in enumerate(self.presets):
+            combo.addItem(preset.name, preset.id)
+            if preset.id == self.active_preset_id:
+                active_index = index
+        if self.presets:
+            combo.setEnabled(True)
+            if active_index >= 0:
+                combo.setCurrentIndex(active_index)
+            else:
+                combo.insertItem(0, "Select profile", "")
+                combo.setCurrentIndex(0)
+        else:
+            combo.addItem("No profiles saved", "")
+            combo.setCurrentIndex(0)
+            combo.setEnabled(False)
+        del blocker
+
+    def _sync_view_profile_combo(self) -> None:
+        combo = getattr(self, "view_profile_combo", None)
+        if combo is None:
+            return
+        blocker = QtCore.QSignalBlocker(combo)
+        combo.clear()
+        active_index = -1
+        for index, preset in enumerate(self.presets):
+            combo.addItem(preset.name, preset.id)
+            if preset.id == self.active_preset_id:
+                active_index = index
+        if self.presets:
+            combo.setEnabled(True)
+            if active_index >= 0:
+                combo.setCurrentIndex(active_index)
+            else:
+                combo.insertItem(0, "-", "")
+                combo.setCurrentIndex(0)
+        else:
+            combo.addItem("-", "")
+            combo.setCurrentIndex(0)
+            combo.setEnabled(False)
+        del blocker
+
     def _rebuild_preset_buttons(self) -> None:
-        while self.preset_buttons_layout.count():
-            item = self.preset_buttons_layout.takeAt(0)
+        self._sync_profile_preset_combo()
+        self._sync_view_profile_combo()
+        preset_buttons_layout = getattr(self, "preset_buttons_layout", None)
+        if preset_buttons_layout is None:
+            return
+
+        while preset_buttons_layout.count():
+            item = preset_buttons_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.setParent(None)
@@ -3984,17 +5336,17 @@ class RendererWindow(QtWidgets.QWidget):
             button.setFixedHeight(34)
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, pid=preset.id: self.apply_preset(pid, start_after=True, manual=True))
-            if isinstance(self.preset_buttons_layout, QtWidgets.QGridLayout):
-                self.preset_buttons_layout.addWidget(button, index // columns, index % columns)
+            if isinstance(preset_buttons_layout, QtWidgets.QGridLayout):
+                preset_buttons_layout.addWidget(button, index // columns, index % columns)
             else:
-                self.preset_buttons_layout.addWidget(button)
+                preset_buttons_layout.addWidget(button)
         if not self.presets:
             empty = QtWidgets.QLabel("No presets saved")
             empty.setStyleSheet(f"color:{DIM}; padding: 6px 2px;")
-            if isinstance(self.preset_buttons_layout, QtWidgets.QGridLayout):
-                self.preset_buttons_layout.addWidget(empty, 0, 0, 1, columns)
+            if isinstance(preset_buttons_layout, QtWidgets.QGridLayout):
+                preset_buttons_layout.addWidget(empty, 0, 0, 1, columns)
             else:
-                self.preset_buttons_layout.addWidget(empty)
+                preset_buttons_layout.addWidget(empty)
 
     def _current_peq_fields(self) -> dict[str, object]:
         return {
@@ -4400,11 +5752,15 @@ class RendererWindow(QtWidgets.QWidget):
             config_id = DEFAULT_CHANNEL_CONFIG
         self.channel_config = config_id
         self.engine.processor.set_monitor_layout(self.channel_config)
-        for button_id, button in self.mode_buttons.items():
+        for button_id, button in getattr(self, "mode_buttons", {}).items():
             button.setProperty("active", button_id == config_id)
             button.style().unpolish(button)
             button.style().polish(button)
         self._rebuild_channel_tiles()
+        if hasattr(self, "bed_input_visualizer"):
+            self.bed_input_visualizer.set_channel_config(self.channel_config)
+        if hasattr(self, "capsule_input_visualizer"):
+            self.capsule_input_visualizer.set_channel_config(self.channel_config)
         if hasattr(self, "room_visualizer"):
             self.room_visualizer.set_channel_config(self.channel_config)
         if self.raw_monitor_dialog is not None:
@@ -5486,7 +6842,22 @@ class RendererWindow(QtWidgets.QWidget):
             self.raw_monitor_dialog.set_channel_config(self.channel_config)
             self.raw_monitor_dialog.set_levels(dsp.channel_levels, dsp.channel_rms)
 
-        self.stereo_sum_meter.set_levels(dsp.left_meter, dsp.right_meter)
+        if hasattr(self, "bed_input_visualizer"):
+            self.bed_input_visualizer.set_levels(
+                dsp.channel_levels,
+                dsp.left_meter,
+                dsp.right_meter,
+                bool(getattr(dsp, "clipping", False)),
+            )
+        if hasattr(self, "capsule_input_visualizer"):
+            self.capsule_input_visualizer.set_levels(
+                dsp.channel_levels,
+                dsp.left_meter,
+                dsp.right_meter,
+                bool(getattr(dsp, "clipping", False)),
+            )
+        if hasattr(self, "stereo_sum_meter"):
+            self.stereo_sum_meter.set_levels(dsp.left_meter, dsp.right_meter)
         sys_text = "Muted" if volume.muted else f"{volume.scalar * 100:.1f}%"
         source = volume.source if volume.available else "unavailable"
 
@@ -5537,7 +6908,7 @@ class RendererWindow(QtWidgets.QWidget):
             fill_parts.append("9.1.6 off")
         fill_parts.append(self._peq_diagnostic_text())
         self._set_label_text_if_changed(self.diag_labels["Upmix"], " | ".join(fill_parts) if fill_parts else "off")
-        active = [tile.name for tile in self.tiles if tile.level > RoomVisualizer.ACTIVE_THRESHOLD]
+        active = list(self.bed_input_visualizer.active_labels) if hasattr(self, "bed_input_visualizer") else []
         self._set_label_text_if_changed(self.diag_labels["Active"], ", ".join(active) if active else "--")
         keep_awake = "keep-awake on" if self.keep_output_awake_enabled else "keep-awake off"
         output_name = self.output_combo.currentText().split("  [", 1)[0] if hasattr(self, "output_combo") else "--"
@@ -5545,6 +6916,7 @@ class RendererWindow(QtWidgets.QWidget):
             self.diag_labels["Output"],
             f"{output_name or '--'} | Windows {sys_text} ({source}) | {keep_awake}",
         )
+        self._sync_diagnostics_dialog_labels()
 
     def _update_header_status(self, snapshot) -> None:
         if not hasattr(self, "header_status"):
@@ -5585,6 +6957,23 @@ class RendererWindow(QtWidgets.QWidget):
             return "9.1.6 monitor | upmix off | label-mapped bed"
         return "7.1 monitor | FL FR FC LFE BL BR SL SR"
 
+    def open_diagnostics(self) -> None:
+        if self.diagnostics_dialog is None:
+            self.diagnostics_dialog = DiagnosticsDialog(None)
+            self.diagnostics_dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.diagnostics_dialog.set_values(self._diagnostic_values())
+        self.diagnostics_dialog.show()
+        self.diagnostics_dialog.raise_()
+        self.diagnostics_dialog.activateWindow()
+
+    def _close_diagnostics_dialog(self) -> None:
+        dialog = self.diagnostics_dialog
+        if dialog is None:
+            return
+        dialog.hide()
+        dialog.close()
+        self.diagnostics_dialog = None
+
     def open_raw_monitor(self) -> None:
         if self.raw_monitor_dialog is None:
             self.raw_monitor_dialog = RawMonitorDialog(None, self.channel_config)
@@ -5621,6 +7010,7 @@ class RendererWindow(QtWidgets.QWidget):
             self.route_probe_button.setEnabled(False)
         if "Output" in self.diag_labels:
             self.diag_labels["Output"].setText("Route probe running...")
+        self._sync_diagnostics_dialog_labels()
         self._set_status("Probe running", "warning")
 
         thread = QtCore.QThread(self)
@@ -5652,6 +7042,7 @@ class RendererWindow(QtWidgets.QWidget):
             self.diag_labels["Output"].setText(
                 f"{truth}{fill_note} | idx6 SL {peak_sl:.5f} | idx7 SR {peak_sr:.5f} | {Path(path).name}"
             )
+        self._sync_diagnostics_dialog_labels()
         status = "running" if truth == "channels_above_8_detected" else "warning"
         self._set_status("Probe saved", status)
         if self._probe_restore_running:
@@ -5662,6 +7053,7 @@ class RendererWindow(QtWidgets.QWidget):
             return
         if "Output" in self.diag_labels:
             self.diag_labels["Output"].setText(f"Probe failed | {detail}")
+        self._sync_diagnostics_dialog_labels()
         self._set_status("Probe failed", "error")
         if self._probe_restore_running:
             self.start_audio()
@@ -5680,13 +7072,12 @@ class RendererWindow(QtWidgets.QWidget):
         self._sync_render_toggle()
 
     def _sync_render_toggle(self) -> None:
-        if not hasattr(self, "render_toggle_button"):
-            return
         try:
             rendering = bool(self.engine.snapshot().running)
         except Exception:
             rendering = False
-        self.render_toggle_button.set_rendering(rendering)
+        if hasattr(self, "render_toggle_button"):
+            self.render_toggle_button.set_rendering(rendering)
 
     def _persist_state(self, was_running: bool, auto_start: bool | None = None) -> None:
         input_device = self._selected_device(self.input_combo)
@@ -5703,6 +7094,7 @@ class RendererWindow(QtWidgets.QWidget):
                 "preamp_db": int(self.preamp_slider.value()) if hasattr(self, "preamp_slider") else DEFAULT_PREAMP_DB,
                 "user_volume": 1.0,
                 "channel_config": self.channel_config,
+                "view_visualizer_mode": self.view_visualizer_mode,
                 "active_preset_id": self.active_preset_id,
                 "presets": [preset.to_dict() for preset in self.presets],
                 "was_running": bool(was_running),

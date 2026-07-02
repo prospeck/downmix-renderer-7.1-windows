@@ -296,7 +296,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertEqual(calls[0][3], 512)
         self.assertEqual(calls[0][4], 192000)
 
-    def test_start_keeps_volume_follower_on_default_endpoint_for_media_keys(self) -> None:
+    def test_start_prepares_selected_output_endpoint_without_rebinding_volume_follower(self) -> None:
         master_volume_calls: list[tuple[float, bool]] = []
 
         class FakeProcessor:
@@ -312,6 +312,10 @@ class AudioEngineSettingsTests(unittest.TestCase):
         class FakeVolumeFollower:
             def __init__(self) -> None:
                 self.targets: list[str] = []
+                self.prepared: list[str] = []
+
+            def prepare_output_endpoint(self, endpoint_id: str | None) -> None:
+                self.prepared.append(endpoint_id or "")
 
             def set_output_endpoint_id(self, endpoint_id: str | None) -> None:
                 self.targets.append(endpoint_id or "")
@@ -343,6 +347,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
             engine.start(fake_device("input", endpoint_id="{input-endpoint}"), fake_device("output", endpoint_id="{output-endpoint}"))
         engine.close()
 
+        self.assertEqual(follower.prepared, ["{output-endpoint}"])
         self.assertEqual(follower.targets, [])
         self.assertEqual(master_volume_calls[-1], (0.42, False))
 

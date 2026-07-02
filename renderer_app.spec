@@ -15,7 +15,7 @@ from PyInstaller.utils.win32.versioninfo import (
 
 ROOT = Path(SPECPATH)
 ICON = ROOT / "assets" / "downmix_renderer_logo.ico"
-DIST_NAME = os.environ.get("DOWNMIX_RENDERER_DIST_NAME", "Finalised Version")
+DIST_NAME = os.environ.get("DOWNMIX_RENDERER_DIST_NAME", "Downmix Renderer Software")
 
 VERSION_INFO = VSVersionInfo(
     ffi=FixedFileInfo(

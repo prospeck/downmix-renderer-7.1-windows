@@ -599,11 +599,11 @@ class DownmixProcessor:
         return float(np.max(stereo_abs))
 
     def _apply_sound_enhancer(self, frames: int) -> tuple[float, bool]:
-        """Apply transparent laptop-speaker loudness with a protected ceiling.
+        """Apply transparent post-mix loudness with a protected ceiling.
 
         The enhancer is intentionally post-mix and pre-final-limiter: it does
         not change matrix/downmix math, PEQ, trims, routing, or channel state.
-        It adds fixed makeup gain for quiet laptop speakers, then uses a fast
+        It adds fixed makeup gain, then uses a fast
         safety gain to keep the boosted block under a -1 dBFS ceiling before
         the existing full-scale limiter gets a final chance to catch anomalies.
         """
@@ -903,21 +903,41 @@ class DownmixProcessor:
         sl = bus[:, 8]
         sr = bus[:, 9]
 
-        if self._peak_mono(sl, frames) <= UPMIX_916_THRESHOLD and self._peak_mono(sr, frames) <= UPMIX_916_THRESHOLD:
-            scratch[:, 18] = 0.5 * bl + 0.25 * fl
-            scratch[:, 19] = 0.5 * br + 0.25 * fr
-            side_src_l = scratch[:, 18]
-            side_src_r = scratch[:, 19]
-        else:
-            side_src_l = sl
-            side_src_r = sr
-
         front_side = scratch[:, 0]
         side_side = scratch[:, 1]
         rear_side = scratch[:, 2]
         front_side[:] = 0.5 * (fl - fr)
-        side_side[:] = 0.5 * (side_src_l - side_src_r)
         rear_side[:] = 0.5 * (bl - br)
+
+        has_side_l = self._peak_mono(sl, frames) > UPMIX_916_THRESHOLD
+        has_side_r = self._peak_mono(sr, frames) > UPMIX_916_THRESHOLD
+        has_sides = has_side_l or has_side_r
+        has_rears = (
+            self._peak_mono(bl, frames) > UPMIX_916_THRESHOLD
+            or self._peak_mono(br, frames) > UPMIX_916_THRESHOLD
+        )
+        front_width_active = self._peak_mono(front_side, frames) > UPMIX_916_THRESHOLD
+        if not (has_sides or has_rears or front_width_active):
+            return False
+
+        side_src_l = scratch[:, 18]
+        side_src_r = scratch[:, 19]
+        if has_sides:
+            side_src_l[:] = sl
+            side_src_r[:] = sr
+        elif has_rears:
+            side_src_l[:] = 0.62 * bl + 0.10 * front_side
+            side_src_r[:] = 0.62 * br - 0.10 * front_side
+        else:
+            side_src_l.fill(0.0)
+            side_src_r.fill(0.0)
+
+        if has_sides or has_rears:
+            side_side[:] = 0.5 * (side_src_l - side_src_r)
+        else:
+            side_side[:] = front_side
+        generate_side_l = not has_side_l and (not has_sides or has_rears or front_width_active)
+        generate_side_r = not has_side_r and (not has_sides or has_rears or front_width_active)
 
         front_amb_l = self._decorrelate(front_side, scratch[:, 3], 0)
         front_amb_r = self._decorrelate(front_side, scratch[:, 4], 1)
@@ -936,29 +956,53 @@ class DownmixProcessor:
 
         work = scratch[:, 16]
 
-        work[:] = 0.55 * bl + 0.20 * side_src_l + 0.20 * rear_amb_l + 0.10 * side_amb_l
+        if generate_side_l:
+            if has_rears:
+                work[:] = 0.50 * side_src_l + 0.18 * side_amb_l + 0.10 * rear_amb_l + 0.08 * front_amb_l
+                self._shape_generated(work, scratch[:, 21], 15, 8, highpass_hz=90.0, lowpass_hz=14000.0, shelf_db=0.0)
+            else:
+                work[:] = 0.46 * side_amb_l + 0.24 * front_amb_l
+                self._shape_generated(work, scratch[:, 21], 15, 8, highpass_hz=180.0, lowpass_hz=12500.0, shelf_db=0.5)
+            bus[:, 8] = scratch[:, 21] * UPMIX_916_GENERATED_GAIN
+
+        if generate_side_r:
+            if has_rears:
+                work[:] = 0.50 * side_src_r + 0.18 * side_amb_r + 0.10 * rear_amb_r + 0.08 * front_amb_r
+                self._shape_generated(work, scratch[:, 22], 16, 9, highpass_hz=90.0, lowpass_hz=14000.0, shelf_db=0.0)
+            else:
+                work[:] = 0.46 * side_amb_r + 0.24 * front_amb_r
+                self._shape_generated(work, scratch[:, 22], 16, 9, highpass_hz=180.0, lowpass_hz=12500.0, shelf_db=0.5)
+            bus[:, 9] = scratch[:, 22] * UPMIX_916_GENERATED_GAIN
+
+        work[:] = 0.48 * bl + 0.14 * side_src_l + 0.18 * rear_amb_l + 0.08 * side_amb_l if has_rears else 0.24 * side_amb_l + 0.16 * front_amb_l
         self._shape_generated(work, bus[:, 6], 7, 0, highpass_hz=100.0, lowpass_hz=14000.0, shelf_db=0.0)
-        work[:] = 0.55 * br + 0.20 * side_src_r + 0.20 * rear_amb_r + 0.10 * side_amb_r
+        work[:] = 0.48 * br + 0.14 * side_src_r + 0.18 * rear_amb_r + 0.08 * side_amb_r if has_rears else 0.24 * side_amb_r + 0.16 * front_amb_r
         self._shape_generated(work, bus[:, 7], 8, 1, highpass_hz=100.0, lowpass_hz=14000.0, shelf_db=0.0)
 
-        work[:] = 0.18 * fl_air + 0.06 * fc_air + 0.30 * front_amb_l + 0.08 * side_amb_l
+        work[:] = 0.10 * fl_air + 0.04 * fc_air + 0.34 * front_amb_l + 0.10 * side_amb_l
         self._shape_generated(work, bus[:, 10], 9, 2, highpass_hz=200.0, lowpass_hz=14000.0, shelf_db=2.0)
-        work[:] = 0.18 * fr_air + 0.06 * fc_air + 0.30 * front_amb_r + 0.08 * side_amb_r
+        work[:] = 0.10 * fr_air + 0.04 * fc_air + 0.34 * front_amb_r + 0.10 * side_amb_r
         self._shape_generated(work, bus[:, 11], 10, 3, highpass_hz=200.0, lowpass_hz=14000.0, shelf_db=2.0)
 
-        work[:] = 0.16 * sl_air + 0.08 * bl_air + 0.35 * side_amb_l + 0.12 * rear_amb_l
+        work[:] = 0.12 * sl_air + 0.08 * bl_air + 0.34 * side_amb_l + 0.12 * rear_amb_l
         self._shape_generated(work, bus[:, 12], 11, 4, highpass_hz=200.0, lowpass_hz=13000.0, shelf_db=1.0)
-        work[:] = 0.16 * sr_air + 0.08 * br_air + 0.35 * side_amb_r + 0.12 * rear_amb_r
+        work[:] = 0.12 * sr_air + 0.08 * br_air + 0.34 * side_amb_r + 0.12 * rear_amb_r
         self._shape_generated(work, bus[:, 13], 12, 5, highpass_hz=200.0, lowpass_hz=13000.0, shelf_db=1.0)
 
-        work[:] = 0.16 * bl_air + 0.08 * sl_air + 0.35 * rear_amb_l + 0.10 * side_amb_l
+        work[:] = 0.13 * bl_air + 0.07 * sl_air + 0.34 * rear_amb_l + 0.12 * side_amb_l
         self._shape_generated(work, bus[:, 14], 13, 6, highpass_hz=250.0, lowpass_hz=12000.0, shelf_db=0.5)
-        work[:] = 0.16 * br_air + 0.08 * sr_air + 0.35 * rear_amb_r + 0.10 * side_amb_r
+        work[:] = 0.13 * br_air + 0.07 * sr_air + 0.34 * rear_amb_r + 0.12 * side_amb_r
         self._shape_generated(work, bus[:, 15], 14, 7, highpass_hz=250.0, lowpass_hz=12000.0, shelf_db=0.5)
 
         for speaker in GENERATED_SHARUR_SPEAKERS:
             bus[:, SHARUR_9_1_6_LAYOUT.index_of(speaker)] *= UPMIX_916_GENERATED_GAIN
-        return True
+
+        generated_indices = [SHARUR_9_1_6_LAYOUT.index_of(speaker) for speaker in GENERATED_SHARUR_SPEAKERS]
+        if generate_side_l:
+            generated_indices.append(8)
+        if generate_side_r:
+            generated_indices.append(9)
+        return any(self._peak_mono(bus[:, index], frames) > UPMIX_916_THRESHOLD for index in generated_indices)
 
     def _decorrelate(self, source: np.ndarray, output: np.ndarray, slot: int) -> np.ndarray:
         output[:] = source

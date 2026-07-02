@@ -21,6 +21,10 @@ Debug/
 Release/
 analysis_artifacts/
 testing/
+production testing/
+ui testing/
+Downmix Renderer Software/
+DMR macos/
 * Build/
 final*/
 Finalised*/

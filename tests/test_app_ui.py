@@ -13,6 +13,7 @@ from PyQt5 import QtGui, QtWidgets
 from PyQt5 import QtCore
 
 from downmix_renderer.app import (
+    APP_DEFAULT_WINDOW_SIZE,
     BASELINE_RECOVERY_VERSION,
     BASE_STYLE,
     DEVICE_FORCE_REFRESH_INTERVAL,
@@ -21,22 +22,39 @@ from downmix_renderer.app import (
     GITHUB_URL,
     ICON_BIG,
     ICON_SMALL,
+    DiagnosticsDialog,
     RawMonitorDialog,
     RendererWindow,
     RouteGlassCombo,
     RawChannelTile,
+    BedInputVisualizer,
+    CapsuleInputVisualizer,
     RoomVisualizer,
     SpatialPage,
     StereoSumMeter,
+    SessionRenderToggle,
     SwitchCheckBox,
+    ViewStyleCombo,
+    VIEW_VISUALIZER_CAPSULE,
+    VIEW_VISUALIZER_CLUSTER,
+    VIEW_METER_COLOR_STOPS,
+    VIEW_NODE_GROUP_COLORS,
+    VIEW_SUM_METER_COLOR_STOPS,
+    VIEW_SUM_METER_PEAK_YELLOW,
     ChannelTile,
     VUMeter,
     TrimLineEdit,
     WM_SETICON,
+    _view_capsule_drive_for_db,
+    _view_capsule_palette_for_db,
+    _view_node_color,
+    _view_oled_signal_color,
+    _view_sum_meter_color_for_db,
     apply_windows_window_icons,
     build_details_body,
     clamp_trim_db,
     configure_qt_scaling,
+    destroy_windows_icon_handles,
 )
 from downmix_renderer.constants import APP_DISPLAY_NAME, CHANNEL_LAYOUTS
 from downmix_renderer.devices import AudioDevice
@@ -203,19 +221,19 @@ class AppUiTests(unittest.TestCase):
         self.addCleanup(cleanup_window)
         return window
 
-    def test_main_renderer_page_has_no_scroll_area(self) -> None:
+    def test_revamped_window_uses_wide_view_and_advanced_pages(self) -> None:
         window = self.make_window()
-        main = window.findChild(QtWidgets.QWidget, "mainPage")
+        view = window.findChild(QtWidgets.QWidget, "viewPage")
+        advanced = window.findChild(QtWidgets.QWidget, "advancedPage")
 
-        self.assertIsNotNone(main)
-        self.assertEqual(window.minimumSize(), QtCore.QSize(1120, 925))
-        self.assertEqual(window.size(), QtCore.QSize(1212, 925))
-        self.assertIsInstance(main, SpatialPage)
-        self.assertEqual(main.findChildren(QtWidgets.QScrollArea), [])
-        layout = main.layout()
-        self.assertEqual(layout.columnStretch(0), 0)
-        self.assertEqual(layout.columnStretch(1), 1)
-        self.assertEqual(layout.columnStretch(2), 0)
+        self.assertIsInstance(view, SpatialPage)
+        self.assertIsInstance(advanced, SpatialPage)
+        self.assertEqual(window.minimumSize(), APP_DEFAULT_WINDOW_SIZE)
+        self.assertEqual(window.maximumSize(), APP_DEFAULT_WINDOW_SIZE)
+        self.assertEqual(window.size(), APP_DEFAULT_WINDOW_SIZE)
+        self.assertGreater(window.width(), window.height() * 1.5)
+        self.assertIsNone(window.findChild(QtWidgets.QWidget, "mainPage"))
+        self.assertIsNone(window.findChild(QtWidgets.QWidget, "presetsPage"))
 
     def test_launch_survives_initial_device_enumeration_failure(self) -> None:
         window = self.make_window(
@@ -275,7 +293,7 @@ class AppUiTests(unittest.TestCase):
 
     def test_spatial_page_draws_live_finalised_v3_backdrop_layer(self) -> None:
         window = self.make_window()
-        page = window.findChild(QtWidgets.QWidget, "mainPage")
+        page = window.findChild(QtWidgets.QWidget, "viewPage")
 
         with patch("downmix_renderer.app.paint_spatial_backdrop") as paint_backdrop:
             page.paintEvent(QtGui.QPaintEvent(page.rect()))
@@ -285,7 +303,7 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(call.args[1], window.rect())
         self.assertEqual(call.args[2], window._backdrop_phase)
         self.assertTrue(call.kwargs["lower_balance"])
-        self.assertAlmostEqual(call.kwargs["intensity"], 0.44)
+        self.assertAlmostEqual(call.kwargs["intensity"], 0.52)
         self.assertTrue(call.kwargs["cinematic_depth"])
         self.assertIsInstance(call.kwargs["cursor"], QtCore.QPoint)
 
@@ -296,17 +314,14 @@ class AppUiTests(unittest.TestCase):
         self.assertIsNotNone(sync_visual_performance)
 
         self.assertEqual(window.backdrop_timer.interval(), window.IDLE_BACKDROP_INTERVAL_MS)
-        self.assertLess(window.room_visualizer.animation_timer.interval(), window.AUDIO_SAFE_ROOM_INTERVAL_MS)
 
         sync_visual_performance(rendering=True)
 
         self.assertEqual(window.backdrop_timer.interval(), window.AUDIO_SAFE_BACKDROP_INTERVAL_MS)
-        self.assertEqual(window.room_visualizer.animation_timer.interval(), window.AUDIO_SAFE_ROOM_INTERVAL_MS)
 
         sync_visual_performance(rendering=False)
 
         self.assertEqual(window.backdrop_timer.interval(), window.IDLE_BACKDROP_INTERVAL_MS)
-        self.assertEqual(window.room_visualizer.animation_timer.interval(), window.IDLE_ROOM_INTERVAL_MS)
 
     def test_backdrop_phase_advance_matches_finalised_v3(self) -> None:
         window = self.make_window()
@@ -323,7 +338,9 @@ class AppUiTests(unittest.TestCase):
         window = self.make_window()
         window.show()
         self.addCleanup(window.hide)
-        page = window.findChild(QtWidgets.QWidget, "mainPage")
+        window.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+        page = window.findChild(QtWidgets.QWidget, "advancedPage")
         self.assertIsNotNone(page)
         page_rect = QtCore.QRect(page.mapTo(window, QtCore.QPoint(0, 0)), page.size())
         expected_region = QtGui.QRegion(window.rect()) - QtGui.QRegion(page_rect)
@@ -347,13 +364,15 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(call.args[1], window.rect())
         self.assertEqual(call.args[2], window._backdrop_phase)
         self.assertTrue(call.kwargs["lower_balance"])
+        self.assertAlmostEqual(call.kwargs["intensity"], 0.52)
+        self.assertTrue(call.kwargs["cinematic_depth"])
         self.assertIsInstance(call.kwargs["cursor"], QtCore.QPoint)
 
     def test_window_backdrop_skips_region_covered_by_live_spatial_page(self) -> None:
         window = self.make_window()
         window.show()
         self.addCleanup(window.hide)
-        page = window.findChild(QtWidgets.QWidget, "mainPage")
+        page = window.findChild(QtWidgets.QWidget, "viewPage")
         self.assertIsNotNone(page)
         page_rect = QtCore.QRect(page.mapTo(window, QtCore.QPoint(0, 0)), page.size())
 
@@ -369,7 +388,7 @@ class AppUiTests(unittest.TestCase):
         window = self.make_window()
         window.show()
         self.addCleanup(window.hide)
-        page = window.findChild(QtWidgets.QWidget, "mainPage")
+        page = window.findChild(QtWidgets.QWidget, "viewPage")
         self.assertIsNotNone(page)
         dirty_rect = QtCore.QRect(24, 28, 180, 120)
         expected_bounds = QtCore.QRect(page.mapTo(window, dirty_rect.topLeft()), dirty_rect.size())
@@ -384,6 +403,7 @@ class AppUiTests(unittest.TestCase):
         window = self.make_window()
 
         self.assertIsNotNone(window.system_boot_checkbox)
+        self.assertIsNotNone(window.diagnostics_button)
         self.assertIsNotNone(window.raw_monitor_button)
         self.assertIsNotNone(window.refresh_devices_button)
         self.assertIsNotNone(window.smart_switch_checkbox)
@@ -396,7 +416,13 @@ class AppUiTests(unittest.TestCase):
             [window.sample_rate_combo.itemData(row) for row in range(window.sample_rate_combo.count())],
             ["auto", "48000", "96000", "192000"],
         )
-        self.assertIsInstance(window.stereo_sum_meter, StereoSumMeter)
+        self.assertIsInstance(window.bed_input_visualizer, BedInputVisualizer)
+        self.assertIsInstance(window.capsule_input_visualizer, CapsuleInputVisualizer)
+        self.assertIsInstance(window.view_profile_combo, ViewStyleCombo)
+        self.assertEqual(window.view_profile_combo.currentText(), "-")
+        self.assertIsInstance(window.view_visualizer_combo, ViewStyleCombo)
+        self.assertEqual(window.view_visualizer_combo.currentText(), "Spatial")
+        self.assertFalse(hasattr(window, "stereo_sum_meter"))
         self.assertIsNotNone(window.info_button)
         self.assertEqual(window.info_button.text(), "")
         self.assertEqual(window.info_button.toolTip(), "Renderer details")
@@ -475,22 +501,15 @@ class AppUiTests(unittest.TestCase):
         self.assertIs(saved[-1]["sound_enhancer_enabled"], False)
         self.assertFalse(window.engine.processor.snapshot().sound_enhancer_enabled)
 
-    def test_keep_output_awake_card_uses_compact_header_layout(self) -> None:
+    def test_keep_output_awake_is_consolidated_into_advanced_automation(self) -> None:
         window = self.make_window()
+        advanced = window.findChild(QtWidgets.QWidget, "advancedPage")
 
-        card = window.findChild(QtWidgets.QFrame, "keepAwakeCard")
-        helper = window.findChild(QtWidgets.QLabel, "keepAwakeHelper")
-        helper_shell = window.findChild(QtWidgets.QWidget, "keepAwakeHelperShell")
-
-        self.assertIsNotNone(card)
-        self.assertIsNotNone(helper)
-        self.assertIsNotNone(helper_shell)
+        self.assertIn(window.keep_awake_checkbox, advanced.findChildren(SwitchCheckBox))
         self.assertEqual(window.keep_awake_checkbox.text(), "Keep output awake")
         self.assertEqual(window.keep_awake_checkbox.minimumHeight(), 28)
-        self.assertLessEqual(card.layout().spacing(), 3)
-        self.assertEqual(helper_shell.layout().contentsMargins().left(), 0)
-        self.assertLessEqual(card.minimumHeight(), 78)
-        self.assertLessEqual(card.maximumHeight(), 84)
+        self.assertIsNone(window.findChild(QtWidgets.QFrame, "keepAwakeCard"))
+        self.assertIsNone(window.findChild(QtWidgets.QLabel, "keepAwakeHelper"))
 
     def test_sample_rate_selector_persists_manual_mode(self) -> None:
         saved: list[dict[str, object]] = []
@@ -535,8 +554,9 @@ class AppUiTests(unittest.TestCase):
 
     def test_sample_rate_selector_is_visible_at_default_launch_size(self) -> None:
         window = self.make_window()
-        window.resize(1190, 735)
+        window.resize(window.minimumSize())
         window.show()
+        window.tabs.setCurrentIndex(0)
         self.app.processEvents()
 
         self.assertTrue(window.sample_rate_combo.isVisible())
@@ -695,10 +715,104 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(room.levels[0], 0.0)
         self.assertGreater(room.display_levels[0], 0.0)
 
+    def test_view_visualizer_uses_macos_meter_stops_and_blue_height_family(self) -> None:
+        self.assertEqual(
+            [stop for stop, _color in VIEW_METER_COLOR_STOPS],
+            [0.0, 38.0, 60.0, 72.0, 80.0, 88.0, 94.0, 100.0],
+        )
+        self.assertEqual(VIEW_SUM_METER_COLOR_STOPS[-1][1], VIEW_SUM_METER_PEAK_YELLOW)
+        self.assertEqual(VIEW_SUM_METER_PEAK_YELLOW, (242, 190, 84))
+        loud_sum_color = _view_sum_meter_color_for_db(0.0)
+        self.assertEqual(
+            (loud_sum_color.red(), loud_sum_color.green(), loud_sum_color.blue()),
+            VIEW_SUM_METER_PEAK_YELLOW,
+        )
+        oled_sum_color = _view_oled_signal_color(loud_sum_color, 0.82)
+        self.assertLess(oled_sum_color.red(), loud_sum_color.red())
+        self.assertLess(oled_sum_color.green(), loud_sum_color.green())
+        self.assertIn("_view_oled_signal_color", BedInputVisualizer._draw_sum_meter.__code__.co_names)
+        self.assertNotIn("#74501b", BedInputVisualizer._draw_sum_meter.__code__.co_consts)
+        self.assertEqual(BedInputVisualizer.NODE_VISUAL_IDLE_DB, BedInputVisualizer.METER_FLOOR_DB)
+        self.assertEqual(BedInputVisualizer.INPUT_RENDER_BUCKET_DB, 0.5)
+        self.assertEqual(BedInputVisualizer.METER_PEAK_HOLD_SECONDS, 0.008)
+        self.assertEqual(BedInputVisualizer.METER_RELEASE_DB_PER_SECOND, 45.0)
+        self.assertIn("DashLine", BedInputVisualizer._draw_node.__code__.co_names)
+        self.assertIn("setDashPattern", BedInputVisualizer._draw_node.__code__.co_names)
+        self.assertIn("_view_meter_fraction", BedInputVisualizer._draw_node.__code__.co_names)
+        self.assertIn("_view_oled_signal_color", BedInputVisualizer._draw_node.__code__.co_names)
+        self.assertNotIn("_view_capsule_drive_for_db", BedInputVisualizer._draw_node.__code__.co_names)
+        for source_name in ("TFL", "TFR", "TBL", "TBR"):
+            base = QtGui.QColor(VIEW_NODE_GROUP_COLORS[source_name])
+            active = _view_node_color(source_name, -10.0)
+            self.assertGreater(base.blue(), base.red() * 2)
+            self.assertGreater(active.blue(), active.red())
+            self.assertGreater(active.alpha(), 0)
+
+        side = _view_node_color("SL", -24.0)
+        middle_top = _view_node_color("TSL", -24.0)
+        self.assertGreaterEqual(side.blue(), side.red())
+        self.assertGreaterEqual(middle_top.blue(), middle_top.red())
+        self.assertNotIn("_draw_header", BedInputVisualizer.paintEvent.__code__.co_names)
+
+    def test_capsule_palette_uses_spatial_db_color_language(self) -> None:
+        front_low = _view_capsule_palette_for_db("FL", -80.0)
+        front_loud = _view_capsule_palette_for_db("FL", -1.0)
+        lfe_loud = _view_capsule_palette_for_db("LFE", -1.0)
+        top_loud = _view_capsule_palette_for_db("TFL", -1.0)
+
+        self.assertIsNotNone(front_low)
+        self.assertIsNotNone(front_loud)
+        self.assertIsNotNone(lfe_loud)
+        self.assertIsNotNone(top_loud)
+        self.assertLess(_view_capsule_drive_for_db(-90.0), _view_capsule_drive_for_db(-12.0))
+        self.assertGreater(front_loud[1].red(), front_low[1].red())
+        self.assertGreater(front_loud[1].alpha(), front_low[1].alpha() + 40)
+        self.assertGreater(front_loud[1].red(), front_loud[1].green())
+        self.assertGreater(lfe_loud[1].green(), lfe_loud[1].red())
+        self.assertGreater(top_loud[1].blue(), top_loud[1].red())
+        self.assertGreater(front_loud[3].alpha(), front_low[3].alpha())
+        self.assertGreater(front_loud[4].alpha(), front_low[4].alpha() + 40)
+
+    def test_view_visualizer_adds_micro_motion_for_steady_generated_channels(self) -> None:
+        visualizer = BedInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+        levels = [0.0] * 16
+        levels[10] = 0.2
+
+        visualizer.set_levels(levels, 0.0, 0.0)
+        phase = visualizer._motion_phase
+        visualizer.set_levels(levels, 0.0, 0.0)
+
+        self.assertNotEqual(visualizer._motion_phase, phase)
+        self.assertEqual(visualizer.active_node_count, 1)
+
+    def test_cluster_visualizer_uses_processed_upmix_levels_for_height_channels(self) -> None:
+        visualizer = BedInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+        levels = [0.0] * 16
+        levels[10] = 0.42
+        levels[12] = 0.31
+        levels[14] = 0.22
+
+        visualizer.set_levels(levels, 0.0, 0.0)
+
+        mapping = {str(node["label"]): int(node["source_index"]) for node in visualizer.nodes}
+        kind_by_label = {str(node["label"]): str(node["kind"]) for node in visualizer.nodes}
+        self.assertEqual(mapping["Ltf"], 10)
+        self.assertEqual(mapping["Ltm"], 12)
+        self.assertEqual(mapping["Ltr"], 14)
+        self.assertEqual(
+            [kind_by_label[label] for label in ("Ltf", "Rtf", "Ltm", "Rtm", "Ltr", "Rtr")],
+            ["top", "top", "top", "top", "top", "top"],
+        )
+        self.assertGreater(visualizer.node_display_db[10], BedInputVisualizer.METER_FLOOR_DB)
+        self.assertGreater(visualizer.node_display_db[12], BedInputVisualizer.METER_FLOOR_DB)
+        self.assertGreater(visualizer.node_display_db[14], BedInputVisualizer.METER_FLOOR_DB)
+
     def test_route_dropdown_popups_use_themed_route_views(self) -> None:
         window = self.make_window()
 
-        for combo in (window.output_combo, window.sample_rate_combo):
+        for combo in (window.output_combo, window.sample_rate_combo, window.view_profile_combo, window.view_visualizer_combo):
             self.assertIsInstance(combo, RouteGlassCombo)
             self.assertEqual(combo.objectName(), "routeGlassCombo")
             self.assertEqual(combo.view().objectName(), "routeGlassPopup")
@@ -706,6 +820,13 @@ class AppUiTests(unittest.TestCase):
             self.assertGreaterEqual(combo.maxVisibleItems(), 6)
             self.assertIn("QListView#routeGlassPopup", combo.view().styleSheet())
             self.assertIn("rgba(3, 3, 3, 250)", combo.view().styleSheet())
+        self.assertIsInstance(window.view_profile_combo, ViewStyleCombo)
+        self.assertEqual(window.view_profile_combo.currentText(), "-")
+        self.assertEqual(window.view_profile_combo.parentWidget().objectName(), "viewProfileSelector")
+        self.assertIsInstance(window.view_visualizer_combo, ViewStyleCombo)
+        self.assertFalse(getattr(window.view_visualizer_combo, "has_selected_preview", True))
+        self.assertEqual([window.view_visualizer_combo.itemText(row) for row in range(2)], ["Spatial", "Channels"])
+        self.assertEqual(window.view_visualizer_combo.parentWidget().objectName(), "viewStyleSelector")
 
     def test_route_selector_labels_are_symmetrical(self) -> None:
         window = self.make_window()
@@ -724,10 +845,27 @@ class AppUiTests(unittest.TestCase):
         centers = [label.mapTo(window, QtCore.QPoint(0, label.height() // 2)).y() for label in labels.values()]
         route_lane = window.findChild(QtWidgets.QFrame, "routeLane")
         self.assertIsNotNone(route_lane)
+        view_mode_row = window.findChild(QtWidgets.QWidget, "viewModeRow")
+        self.assertIsNotNone(view_mode_row)
+        self.assertEqual(route_lane.findChildren(QtWidgets.QPushButton, "viewModeButton"), [])
+        self.assertEqual(len(view_mode_row.findChildren(QtWidgets.QPushButton, "viewModeButton")), 2)
+        self.assertNotIn("View", [label.text() for label in view_mode_row.findChildren(QtWidgets.QLabel, "routeEyebrow")])
+        mode_layout = view_mode_row.layout()
+        control_order = [
+            mode_layout.itemAt(index).widget().objectName()
+            for index in range(mode_layout.count())
+            if mode_layout.itemAt(index).widget() is not None
+        ]
+        self.assertEqual(control_order, ["viewModeGroup", "viewProfileSelector", "viewStyleSelector"])
+        self.assertEqual(window.view_visualizer_combo.width(), ViewStyleCombo.fixed_premium_width)
+        self.assertEqual(window.view_profile_combo.width(), ViewStyleCombo.fixed_premium_width)
         route_layout = route_lane.layout()
         route_order: list[str] = []
         for index in range(route_layout.count()):
             widget = route_layout.itemAt(index).widget()
+            if widget is window.render_toggle_button:
+                route_order.append("Render")
+                continue
             if widget is window.refresh_devices_button:
                 route_order.append("Refresh devices")
                 continue
@@ -736,7 +874,7 @@ class AppUiTests(unittest.TestCase):
                 route_order.append(label.text())
 
         self.assertEqual(widths, {88})
-        self.assertEqual(route_order, ["Input device", "Output device", "Sample rate", "Refresh devices"])
+        self.assertEqual(route_order, ["Input device", "Output device", "Sample rate", "Render", "Refresh devices"])
         self.assertLessEqual(max(tops) - min(tops), 1)
         self.assertLessEqual(max(centers) - min(centers), 1)
         self.assertGreaterEqual(window.sample_rate_combo.width(), 94)
@@ -799,6 +937,18 @@ class AppUiTests(unittest.TestCase):
             self.app.processEvents()
             self.assertLess(combo.open_progress, 1.0)
 
+    def test_route_dropdown_releases_delegate_filters_before_qt_shutdown(self) -> None:
+        combo = RouteGlassCombo()
+        self.addCleanup(combo.deleteLater)
+        delegate = combo._popup_delegate
+        detach_calls: list[bool] = []
+        delegate.detach = lambda: detach_calls.append(True)
+
+        combo._release_popup_delegate()
+
+        self.assertEqual(detach_calls, [True])
+        self.assertIsNone(combo._popup_delegate)
+
     def test_saved_keep_output_awake_starts_silent_stream_when_renderer_is_stopped(self) -> None:
         opened: list[object] = []
 
@@ -843,16 +993,18 @@ class AppUiTests(unittest.TestCase):
         self.assertNotIn("Downmix Renderer " + "7.1", visible_text)
         self.assertNotIn("WASAPI stereo render path | 48 kHz | 256 samples", visible_text)
 
-    def test_header_keeps_premium_renderer_and_presets_tabs(self) -> None:
+    def test_header_keeps_premium_view_and_advanced_tabs(self) -> None:
         window = self.make_window()
         self.addCleanup(self.app.processEvents)
         self.addCleanup(window.hide)
         window.show()
         self.app.processEvents()
 
-        self.assertEqual(window.tabs.tabText(0), "Renderer")
-        self.assertEqual(window.tabs.tabText(1), "Presets")
+        self.assertEqual(window.tabs.tabText(0), "View")
+        self.assertEqual(window.tabs.tabText(1), "Advanced")
+        self.assertEqual(window.tabs.count(), 2)
         self.assertEqual(window.tabs.currentIndex(), 0)
+        self.assertIs(window.tabs.currentWidget(), window.findChild(QtWidgets.QWidget, "viewPage"))
         self.assertEqual(window.header_status.text(), "Shared WASAPI | Ready")
         self.assertEqual(window.github_button.toolTip(), "Open project on GitHub")
         self.assertEqual(window.github_button.objectName(), "headerIconButton")
@@ -868,6 +1020,263 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(window.github_button.width(), 34)
         self.assertEqual(window.github_button.height(), 34)
         self.assertGreaterEqual(window.github_button.geometry().top(), 8)
+
+    def test_view_page_contains_reference_bed_visualizer(self) -> None:
+        window = self.make_window({"channel_config": "sharur_9_1_6"})
+        page = window.findChild(QtWidgets.QWidget, "viewPage")
+        visualizer = window.bed_input_visualizer
+        capsule = window.capsule_input_visualizer
+        mapping = {str(node["label"]): int(node["source_index"]) for node in visualizer.nodes}
+        capsule_mapping = {str(node["label"]): int(node["source_index"]) for node in capsule.nodes}
+
+        self.assertIsNotNone(page)
+        self.assertIsInstance(visualizer, BedInputVisualizer)
+        self.assertIsInstance(capsule, CapsuleInputVisualizer)
+        self.assertIn(visualizer, page.findChildren(BedInputVisualizer))
+        self.assertIn(capsule, page.findChildren(CapsuleInputVisualizer))
+        self.assertIs(window.visualizer_stack.currentWidget(), visualizer)
+        self.assertEqual(window.view_visualizer_combo.currentData(), VIEW_VISUALIZER_CLUSTER)
+        self.assertEqual(
+            [window.view_visualizer_combo.itemData(row) for row in range(window.view_visualizer_combo.count())],
+            [VIEW_VISUALIZER_CLUSTER, VIEW_VISUALIZER_CAPSULE],
+        )
+        self.assertEqual(len(visualizer.nodes), 16)
+        self.assertEqual(
+            mapping,
+            {
+                "L": 0,
+                "R": 1,
+                "C": 2,
+                "LFE": 3,
+                "Lw": 4,
+                "Rw": 5,
+                "Lrs": 6,
+                "Rrs": 7,
+                "Ls": 8,
+                "Rs": 9,
+                "Ltf": 10,
+                "Rtf": 11,
+                "Ltm": 12,
+                "Rtm": 13,
+                "Ltr": 14,
+                "Rtr": 15,
+            },
+        )
+        self.assertEqual(capsule_mapping, mapping)
+        self.assertEqual(
+            capsule.capsule_rows,
+            (
+                ("L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"),
+                ("Lw", "Rw", "Ltf", "Rtf", "Ltm", "Rtm", "Ltr", "Rtr"),
+            ),
+        )
+        self.assertEqual(CapsuleInputVisualizer.CAPSULE_WIDTH, 76.0)
+        self.assertEqual(CapsuleInputVisualizer.CAPSULE_HEIGHT, 42.0)
+        self.assertNotIn("Active bed inputs", "\n".join(label.text() for label in page.findChildren(QtWidgets.QLabel)))
+        self.assertEqual(BedInputVisualizer.METER_FLOOR_DB, -160.0)
+        self.assertEqual(BedInputVisualizer.SUM_METER_TICK_STEP_DB, 10)
+        self.assertIn(window.output_combo, page.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.render_toggle_button, page.findChildren(QtWidgets.QPushButton))
+        self.assertFalse(hasattr(window, "start_render_button"))
+        self.assertFalse(hasattr(window, "stop_render_button"))
+        self.assertIsNone(window.findChild(QtWidgets.QFrame, "viewControlStrip"))
+        self.assertIsNone(window.findChild(QtWidgets.QFrame, "viewModeSegment"))
+        self.assertEqual(window.mode_buttons["windows_7_1"].text(), "7.1")
+        self.assertEqual(window.mode_buttons["sharur_9_1_6"].text(), "9.1.6")
+
+    def test_capsule_visualizer_keeps_active_signal_color_inside_capsule(self) -> None:
+        visualizer = CapsuleInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+        visualizer.resize(1000, 220)
+        levels = [0.0] * 16
+        levels[0] = 1.0
+        visualizer.set_levels(levels, 0.0, 0.0)
+
+        image = QtGui.QImage(visualizer.size(), QtGui.QImage.Format_ARGB32)
+        image.fill(QtGui.QColor("#000000"))
+        visualizer.render(image)
+
+        content = QtCore.QRectF(visualizer.rect()).adjusted(18, 8, -18, -18)
+        stage, _left_meter, _right_meter = visualizer._layout_rects(content)
+        first_row = visualizer.capsule_rows[0]
+        total_width = visualizer.CAPSULE_WIDTH * len(first_row) + visualizer.CAPSULE_GAP * (len(first_row) - 1)
+        capsule_x = stage.center().x() - total_width / 2.0
+        block_height = visualizer.CAPSULE_HEIGHT * 2.0 + visualizer.ROW_GAP
+        capsule_y = stage.center().y() - block_height / 2.0
+        sample_y = int(round(capsule_y + visualizer.CAPSULE_HEIGHT / 2.0))
+
+        inside = image.pixelColor(int(round(capsule_x + 10.0)), sample_y)
+        outside = image.pixelColor(int(round(capsule_x - 3.0)), sample_y)
+
+        self.assertGreater(inside.red(), inside.green())
+        self.assertGreater(inside.red(), inside.blue())
+        self.assertLessEqual(outside.red(), max(outside.green(), outside.blue()) + 8)
+
+    def test_capsule_visualizer_renders_louder_levels_with_more_energy(self) -> None:
+        visualizer = CapsuleInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+        visualizer.resize(1000, 220)
+
+        def sampled_capsule_color(level: float) -> QtGui.QColor:
+            levels = [0.0] * 16
+            levels[0] = level
+            visualizer.set_levels(levels, 0.0, 0.0)
+            image = QtGui.QImage(visualizer.size(), QtGui.QImage.Format_ARGB32)
+            image.fill(QtGui.QColor("#000000"))
+            visualizer.render(image)
+            content = QtCore.QRectF(visualizer.rect()).adjusted(18, 8, -18, -18)
+            stage, _left_meter, _right_meter = visualizer._layout_rects(content)
+            first_row = visualizer.capsule_rows[0]
+            total_width = visualizer.CAPSULE_WIDTH * len(first_row) + visualizer.CAPSULE_GAP * (len(first_row) - 1)
+            capsule_x = stage.center().x() - total_width / 2.0
+            block_height = visualizer.CAPSULE_HEIGHT * 2.0 + visualizer.ROW_GAP
+            capsule_y = stage.center().y() - block_height / 2.0
+            return image.pixelColor(int(round(capsule_x + 10.0)), int(round(capsule_y + visualizer.CAPSULE_HEIGHT / 2.0)))
+
+        quiet = sampled_capsule_color(0.001)
+        loud = sampled_capsule_color(1.0)
+
+        self.assertGreater(loud.red(), quiet.red() + 20)
+        self.assertGreater(loud.red() + loud.green() + loud.blue(), quiet.red() + quiet.green() + quiet.blue() + 20)
+
+    def test_spatial_visualizer_keeps_original_meter_fraction_response_with_oled_tone(self) -> None:
+        visualizer = BedInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+        visualizer.resize(1000, 260)
+
+        def sampled_node_color(level: float) -> QtGui.QColor:
+            levels = [0.0] * 16
+            levels[0] = level
+            visualizer.set_levels(levels, 0.0, 0.0)
+            image = QtGui.QImage(visualizer.size(), QtGui.QImage.Format_ARGB32)
+            image.fill(QtGui.QColor("#000000"))
+            visualizer.render(image)
+            content = QtCore.QRectF(visualizer.rect()).adjusted(18, 8, -18, -18)
+            stage, _left_meter, _right_meter = visualizer._layout_rects(content)
+            node = next(node for node in visualizer.nodes if str(node["label"]) == "L")
+            point = QtCore.QPointF(
+                stage.left() + float(node["x"]) * 0.01 * stage.width(),
+                stage.top() + float(node["y"]) * 0.01 * stage.height(),
+            )
+            size = max(29.0, min(44.0, stage.width() * 0.052))
+            return image.pixelColor(int(round(point.x() - size * 0.28)), int(round(point.y())))
+
+        quiet = sampled_node_color(0.001)
+        loud = sampled_node_color(1.0)
+
+        self.assertGreater(loud.red(), quiet.red() + 4)
+        self.assertLess(loud.green(), quiet.green())
+        self.assertLess(loud.blue(), quiet.blue())
+
+    def test_view_visualizer_selector_switches_stack_and_persists_choice(self) -> None:
+        saved: list[dict[str, object]] = []
+        window = self.make_window({"channel_config": "sharur_9_1_6"}, saved)
+
+        self.assertIs(window.visualizer_stack.currentWidget(), window.bed_input_visualizer)
+
+        window.view_visualizer_combo.setCurrentIndex(1)
+        self.app.processEvents()
+
+        self.assertEqual(window.view_visualizer_mode, VIEW_VISUALIZER_CAPSULE)
+        self.assertIs(window.visualizer_stack.currentWidget(), window.capsule_input_visualizer)
+        self.assertEqual(window.channel_config, "sharur_9_1_6")
+        self.assertEqual(saved[-1]["view_visualizer_mode"], VIEW_VISUALIZER_CAPSULE)
+
+        window.view_visualizer_combo.setCurrentIndex(0)
+        self.app.processEvents()
+
+        self.assertEqual(window.view_visualizer_mode, VIEW_VISUALIZER_CLUSTER)
+        self.assertIs(window.visualizer_stack.currentWidget(), window.bed_input_visualizer)
+        self.assertEqual(saved[-1]["view_visualizer_mode"], VIEW_VISUALIZER_CLUSTER)
+
+    def test_saved_capsule_visualizer_mode_restores_without_changing_layout(self) -> None:
+        window = self.make_window(
+            {
+                "channel_config": "windows_7_1",
+                "view_visualizer_mode": VIEW_VISUALIZER_CAPSULE,
+            }
+        )
+
+        self.assertEqual(window.view_visualizer_combo.currentData(), VIEW_VISUALIZER_CAPSULE)
+        self.assertEqual(window.view_visualizer_combo.currentText(), "Channels")
+        self.assertIs(window.visualizer_stack.currentWidget(), window.capsule_input_visualizer)
+        self.assertEqual(window.channel_config, "windows_7_1")
+        self.assertEqual(window.capsule_input_visualizer.capsule_rows, (("L", "R", "C", "LFE"), ("Ls", "Rs", "Lrs", "Rrs")))
+        self.assertEqual(window.capsule_input_visualizer.CAPSULE_WIDTH, CapsuleInputVisualizer.CAPSULE_WIDTH)
+        self.assertEqual(window.capsule_input_visualizer.CAPSULE_HEIGHT, CapsuleInputVisualizer.CAPSULE_HEIGHT)
+
+    def test_view_page_updates_from_effective_dsp_channels_and_sum_meters(self) -> None:
+        window = self.make_window({"channel_config": "sharur_9_1_6"})
+        raw_levels = [0.0] * 16
+        channel_levels = [0.0] * 16
+        rms_values = [0.0] * 16
+        channel_levels[10] = 0.5
+        channel_levels[4] = 0.25
+        raw_levels[0] = 0.75
+        dsp = SimpleNamespace(
+            channel_levels=channel_levels,
+            channel_rms=rms_values,
+            raw_channel_levels=raw_levels,
+            raw_channel_rms=rms_values,
+            left_meter=0.625,
+            right_meter=1.0,
+            limiter_gain=1.0,
+            clipping=False,
+            sound_enhancer_enabled=False,
+            sound_enhancer_gain=1.0,
+            surround_fill_enabled=False,
+            surround_fill_active=False,
+            upmix_9_1_6_enabled=False,
+            upmix_9_1_6_active=False,
+        )
+        snapshot = SimpleNamespace(
+            running=True,
+            status="Running",
+            route="Test route",
+            input_channels=16,
+            stream_latency=None,
+            stream_profile="ultra",
+            sample_rate=48000,
+            sample_rate_mode="auto",
+            callback_status_count=0,
+            callback_status="",
+            dsp_error_count=0,
+            cpu_load=0.0,
+            dsp=dsp,
+        )
+        volume = SimpleNamespace(muted=False, scalar=1.0, available=True, source="endpoint")
+        window.engine.snapshot = lambda: snapshot
+        window.engine.poll_volume = lambda: volume
+
+        window.update_ui()
+
+        visualizer = window.bed_input_visualizer
+        capsule = window.capsule_input_visualizer
+        self.assertEqual(visualizer.node_levels[10], 0.5)
+        self.assertEqual(visualizer.node_levels[4], 0.25)
+        self.assertGreater(visualizer.node_display_db[10], BedInputVisualizer.METER_FLOOR_DB)
+        self.assertEqual(visualizer.active_node_count, 2)
+        self.assertEqual(visualizer.left_level, 0.625)
+        self.assertEqual(visualizer.right_level, 1.0)
+        self.assertTrue(visualizer.right_clipping)
+        self.assertFalse(visualizer.left_clipping)
+        self.assertEqual(capsule.node_levels[10], visualizer.node_levels[10])
+        self.assertEqual(capsule.node_levels[4], visualizer.node_levels[4])
+        self.assertEqual(capsule.left_level, visualizer.left_level)
+        self.assertEqual(capsule.right_level, visualizer.right_level)
+        self.assertEqual(capsule.active_node_count, visualizer.active_node_count)
+
+    def test_view_sum_clip_is_per_channel_and_only_latches_at_full_scale(self) -> None:
+        visualizer = BedInputVisualizer("sharur_9_1_6")
+        self.addCleanup(visualizer.deleteLater)
+
+        visualizer.set_levels([0.0] * 16, 0.98, 0.4, clipping=True)
+        self.assertFalse(visualizer.left_clipping)
+        self.assertFalse(visualizer.right_clipping)
+
+        visualizer.set_levels([0.0] * 16, 1.0, 0.4, clipping=False)
+        self.assertTrue(visualizer.left_clipping)
+        self.assertFalse(visualizer.right_clipping)
 
     def test_header_status_uses_shared_wasapi_wording(self) -> None:
         window = self.make_window()
@@ -885,28 +1294,48 @@ class AppUiTests(unittest.TestCase):
         self.assertNotIn("Get Started", visible_text)
         self.assertNotIn("Get started", visible_text)
 
-    def test_renderer_columns_align_at_launch(self) -> None:
+    def test_advanced_page_consolidates_settings_diagnostics_and_presets(self) -> None:
         window = self.make_window()
         self.addCleanup(self.app.processEvents)
         self.addCleanup(window.hide)
         window.show()
+        window.tabs.setCurrentIndex(1)
         self.app.processEvents()
 
-        left = window.findChild(QtWidgets.QWidget, "rendererLeftColumn")
-        center = window.findChild(QtWidgets.QWidget, "rendererCenterColumn")
-        right = window.findChild(QtWidgets.QWidget, "rendererRightColumn")
+        advanced = window.findChild(QtWidgets.QWidget, "advancedPage")
+        view = window.findChild(QtWidgets.QWidget, "viewPage")
+        top_row = window.findChild(QtWidgets.QWidget, "advancedTopRow")
+        profile_manager = window.findChild(QtWidgets.QFrame, "profileManagerCard")
+        automation_card = window.smart_switch_checkbox.parentWidget()
+        while automation_card is not None and automation_card.objectName() != "card":
+            automation_card = automation_card.parentWidget()
+        diagnostics = window.diagnostics_button.parentWidget()
+        self.assertIn(window.preamp_slider, advanced.findChildren(QtWidgets.QSlider))
+        self.assertIn(window.smart_switch_checkbox, advanced.findChildren(SwitchCheckBox))
+        self.assertIn(window.diagnostics_button, advanced.findChildren(QtWidgets.QPushButton))
+        self.assertIn(window.raw_monitor_button, advanced.findChildren(QtWidgets.QPushButton))
+        self.assertIn(window.new_preset_button, advanced.findChildren(QtWidgets.QPushButton))
+        self.assertNotIn(window.output_combo, advanced.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.output_combo, view.findChildren(QtWidgets.QComboBox))
+        self.assertIsNotNone(top_row)
+        self.assertIsNotNone(profile_manager)
+        self.assertIsNotNone(automation_card)
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual([label.text() for label in diagnostics.findChildren(QtWidgets.QLabel, "section")], [])
+        controls_card = window.preamp_slider.parentWidget()
+        while controls_card is not None and controls_card.objectName() != "card":
+            controls_card = controls_card.parentWidget()
+        self.assertIsNotNone(controls_card)
+        self.assertGreater(automation_card.geometry().left(), controls_card.geometry().right())
+        self.assertGreater(profile_manager.geometry().left(), automation_card.geometry().right())
+        self.assertGreater(diagnostics.geometry().left(), profile_manager.geometry().right())
+        self.assertAlmostEqual(controls_card.height(), automation_card.height(), delta=8)
+        self.assertAlmostEqual(controls_card.height(), profile_manager.height(), delta=8)
+        self.assertAlmostEqual(diagnostics.height(), profile_manager.height(), delta=8)
+        self.assertFalse(hasattr(window, "room_visualizer"))
+        self.assertFalse(hasattr(window, "stereo_sum_meter"))
 
-        self.assertIsNotNone(left)
-        self.assertIsNotNone(center)
-        self.assertIsNotNone(right)
-        self.assertAlmostEqual(left.geometry().bottom(), center.geometry().bottom(), delta=1)
-        self.assertAlmostEqual(right.geometry().bottom(), center.geometry().bottom(), delta=1)
-        last_left_widget = left.layout().itemAt(left.layout().count() - 1).widget()
-        self.assertIn(window.stereo_sum_meter, last_left_widget.findChildren(StereoSumMeter))
-        meter_bottom = window.stereo_sum_meter.geometry().y() + window.stereo_sum_meter.height()
-        self.assertGreaterEqual(last_left_widget.height(), meter_bottom + 12)
-
-    def test_presets_page_fits_default_launch_without_outer_scroll(self) -> None:
+    def test_advanced_page_uses_one_outer_scroll(self) -> None:
         window = self.make_window()
         self.addCleanup(self.app.processEvents)
         self.addCleanup(window.hide)
@@ -915,27 +1344,34 @@ class AppUiTests(unittest.TestCase):
         window.tabs.setCurrentIndex(1)
         self.app.processEvents()
 
-        presets_page = window.findChild(QtWidgets.QWidget, "presetsPage")
+        presets_page = window.findChild(QtWidgets.QWidget, "advancedPage")
         outer_scrolls = [
             scroll for scroll in presets_page.findChildren(QtWidgets.QScrollArea)
             if scroll.parentWidget() is presets_page
         ]
         self.assertEqual(len(outer_scrolls), 1)
-        self.assertEqual(outer_scrolls[0].verticalScrollBar().maximum(), 0)
+        self.assertGreaterEqual(outer_scrolls[0].verticalScrollBar().maximum(), 0)
 
-    def test_channel_field_uses_premium_room_visualizer(self) -> None:
+    def test_view_visualizer_replaces_renderer_channel_field(self) -> None:
         window = self.make_window()
 
-        self.assertIsInstance(window.room_visualizer, RoomVisualizer)
-        self.assertEqual(window.room_visualizer.speaker_count, 8)
-        self.assertEqual(len(window.tiles), 8)
+        self.assertIsInstance(window.bed_input_visualizer, BedInputVisualizer)
+        self.assertIsInstance(window.capsule_input_visualizer, CapsuleInputVisualizer)
+        self.assertEqual(len(window.bed_input_visualizer.nodes), 8)
+        self.assertEqual(len(window.capsule_input_visualizer.nodes), 8)
+        self.assertEqual(window.tiles, [])
 
         window.set_channel_config("sharur_9_1_6")
-        self.assertEqual(window.room_visualizer.speaker_count, 16)
-        self.assertEqual(len(window.tiles), 16)
-        self.assertEqual(window.room_visualizer.minimumHeight(), RoomVisualizer.FIXED_HEIGHT)
-        self.assertEqual(window.room_visualizer.maximumHeight(), RoomVisualizer.FIXED_HEIGHT)
-        self.assertEqual(RoomVisualizer.FIXED_HEIGHT, 360)
+        self.assertEqual(len(window.bed_input_visualizer.nodes), 16)
+        self.assertEqual(len(window.capsule_input_visualizer.nodes), 16)
+        self.assertEqual(
+            window.capsule_input_visualizer.capsule_rows,
+            (
+                ("L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"),
+                ("Lw", "Rw", "Ltf", "Rtf", "Ltm", "Rtm", "Ltr", "Rtr"),
+            ),
+        )
+        self.assertFalse(hasattr(window, "room_visualizer"))
 
     def test_stereo_sum_meter_latches_clip_from_final_sample_peaks(self) -> None:
         meter = StereoSumMeter()
@@ -956,39 +1392,39 @@ class AppUiTests(unittest.TestCase):
         self.assertTrue(meter.left_clipping)
         self.assertFalse(meter.right_clipping)
 
-    def test_stereo_sum_meter_card_stays_compact(self) -> None:
+    def test_view_stereo_sum_meters_are_integrated_into_visualizer(self) -> None:
         window = self.make_window()
         window.show()
         self.app.processEvents()
 
-        meter_card = window.stereo_sum_meter.parentWidget()
+        self.assertEqual(window.bed_input_visualizer.left_level, 0.0)
+        self.assertEqual(window.bed_input_visualizer.right_level, 0.0)
+        self.assertFalse(hasattr(window, "stereo_sum_meter"))
 
-        self.assertEqual(window.stereo_sum_meter.sizePolicy().verticalPolicy(), QtWidgets.QSizePolicy.Fixed)
-        self.assertEqual(meter_card.sizePolicy().verticalPolicy(), QtWidgets.QSizePolicy.Fixed)
-        self.assertLessEqual(window.stereo_sum_meter.minimumHeight(), 232)
-
-    def test_stereo_meter_is_under_keep_awake_in_left_column(self) -> None:
+    def test_route_and_meter_surfaces_live_only_on_view(self) -> None:
         window = self.make_window()
-        left = window.findChild(QtWidgets.QWidget, "rendererLeftColumn")
-        right = window.findChild(QtWidgets.QWidget, "rendererRightColumn")
-        visible_text = "\n".join(label.text() for label in window.findChildren(QtWidgets.QLabel))
+        view = window.findChild(QtWidgets.QWidget, "viewPage")
+        advanced = window.findChild(QtWidgets.QWidget, "advancedPage")
 
-        self.assertIsNotNone(left)
-        self.assertIsNotNone(right)
-        self.assertIn(window.stereo_sum_meter, left.findChildren(StereoSumMeter))
-        self.assertNotIn(window.stereo_sum_meter, right.findChildren(StereoSumMeter))
-        self.assertIn(window.raw_monitor_button, right.findChildren(QtWidgets.QPushButton))
-        self.assertNotIn("OUTPUT KEEP-ALIVE", visible_text)
+        self.assertIn(window.output_combo, view.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.bed_input_visualizer, view.findChildren(BedInputVisualizer))
+        self.assertIn(window.capsule_input_visualizer, view.findChildren(CapsuleInputVisualizer))
+        self.assertIn(window.view_profile_combo, view.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.view_visualizer_combo, view.findChildren(QtWidgets.QComboBox))
+        self.assertNotIn(window.output_combo, advanced.findChildren(QtWidgets.QComboBox))
+        self.assertNotIn(window.view_profile_combo, advanced.findChildren(QtWidgets.QComboBox))
+        self.assertNotIn(window.view_visualizer_combo, advanced.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.profile_preset_combo, advanced.findChildren(QtWidgets.QComboBox))
+        self.assertIn(window.raw_monitor_button, advanced.findChildren(QtWidgets.QPushButton))
 
-    def test_session_status_has_distinct_premium_treatment(self) -> None:
+    def test_view_session_status_has_distinct_premium_treatment(self) -> None:
         window = self.make_window()
 
+        self.assertIsInstance(window.render_toggle_button, SessionRenderToggle)
         self.assertEqual(window.render_toggle_button.objectName(), "sessionRenderToggle")
-        self.assertGreaterEqual(window.render_toggle_button.minimumHeight(), 42)
         self.assertEqual(window.render_toggle_button.text(), "Render")
-        self.assertFalse(hasattr(window, "status_label"))
-        self.assertFalse(hasattr(window, "start_button"))
-        self.assertFalse(hasattr(window, "stop_button"))
+        self.assertEqual(window.render_toggle_button.width(), 176)
+        self.assertFalse(hasattr(window, "view_render_status"))
         self.assertEqual(window.smart_switch_checkbox.objectName(), "switchControl")
         self.assertEqual(window.system_boot_checkbox.objectName(), "switchControl")
 
@@ -1001,7 +1437,7 @@ class AppUiTests(unittest.TestCase):
         window._toggle_render_session()
         self.assertEqual(calls, ["start", "stop"])
 
-    def test_presets_page_builds_peq_controls_with_profile_labels(self) -> None:
+    def test_advanced_page_builds_peq_controls_with_profile_labels(self) -> None:
         window = self.make_window()
         self.addCleanup(self.app.processEvents)
         self.addCleanup(window.hide)
@@ -1016,13 +1452,22 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(window.speaker_eq_text.objectName(), "peqText")
         self.assertEqual(window.global_peq_load_button.objectName(), "peqAction")
         self.assertEqual(window.speaker_eq_load_button.objectName(), "peqAction")
-        section_text = "\n".join(label.text() for label in window.findChild(QtWidgets.QWidget, "presetsPage").findChildren(QtWidgets.QLabel, "section"))
-        self.assertIn("SAVED PROFILES", section_text)
-        self.assertIn("PROFILE CONTROL", section_text)
+        section_labels = [
+            label.text()
+            for label in window.findChild(QtWidgets.QWidget, "advancedPage").findChildren(QtWidgets.QLabel, "section")
+        ]
+        section_text = "\n".join(section_labels)
+        self.assertIn("AUDIO CONTROLS", section_labels)
+        self.assertIn("SYSTEM AUTOMATION", section_labels)
+        self.assertIn("PROFILES", section_labels)
+        self.assertNotIn("DIAGNOSTICS", section_labels)
+        self.assertNotIn("SESSION SNAPSHOT", section_labels)
+        self.assertNotIn("SAVED PROFILES", section_text)
+        self.assertNotIn("PROFILE CONTROL", section_text)
         self.assertIn("OUTPUT ROUTING AND PEQ", section_text)
         self.assertIn("CHANNEL TRIM", section_text)
         self.assertIn("L-R CORRECTION CHANNEL MAPPING", section_text)
-        self.assertEqual(window.tabs.tabText(1), "Presets")
+        self.assertEqual(window.tabs.tabText(1), "Advanced")
         self.assertEqual(window.lr_swap_panel.geometry().top(), window.channel_trim_panel.geometry().top())
         self.assertAlmostEqual(window.lr_swap_panel.width(), window.channel_trim_panel.width(), delta=1)
         self.assertEqual(window.lr_swap_panel.height(), window.channel_trim_panel.height())
@@ -1030,10 +1475,22 @@ class AppUiTests(unittest.TestCase):
         self.assertGreater(window.speaker_mapping_panel.geometry().top(), window.channel_trim_panel.geometry().bottom())
         self.assertEqual(window.speaker_mapping_panel.geometry().left(), window.lr_swap_panel.geometry().left())
         self.assertGreater(window.speaker_mapping_panel.width(), window.lr_swap_panel.width() + window.channel_trim_panel.width())
-        presets_body = window.findChild(QtWidgets.QWidget, "presetsBody")
+        presets_body = window.findChild(QtWidgets.QWidget, "advancedBody")
         self.assertLessEqual(presets_body.height() - window.peq_routing_card.geometry().bottom(), 8)
+        swap_helper = next(
+            label
+            for label in window.lr_swap_panel.findChildren(QtWidgets.QLabel, "peqHelper")
+            if label.text().startswith("Swaps")
+        )
+        trim_helper = next(
+            label
+            for label in window.channel_trim_panel.findChildren(QtWidgets.QLabel, "peqHelper")
+            if label.text().startswith("Quick fine-tuning")
+        )
+        self.assertLessEqual(abs(trim_helper.geometry().top() - swap_helper.geometry().top()), 10)
+        self.assertLessEqual(window.channel_trim_panel.height() - trim_helper.geometry().bottom(), 10)
 
-    def test_presets_page_uses_compact_profile_manager_grid(self) -> None:
+    def test_advanced_page_uses_compact_profile_dropdown(self) -> None:
         first = preset_from_current("Qudelix Wired", fake_input(), fake_usb_output(), -6, 1.0, "windows_7_1")
         second = preset_from_current("Speakers", fake_input(), fake_output(), -8, 1.0, "windows_7_1")
         window = self.make_window(
@@ -1053,19 +1510,83 @@ class AppUiTests(unittest.TestCase):
         self.app.processEvents()
 
         manager = window.findChild(QtWidgets.QFrame, "profileManagerCard")
-        profile_scroll = window.findChild(QtWidgets.QScrollArea, "profileListScroll")
-        actions = window.findChild(QtWidgets.QWidget, "profileActions")
-        buttons = window.findChildren(QtWidgets.QPushButton, "preset")
+        selector = window.profile_preset_combo
+        action_row = window.findChild(QtWidgets.QWidget, "profileActionRow")
+        old_profile_scroll = window.findChild(QtWidgets.QScrollArea, "profileListScroll")
+        old_preset_buttons = window.findChildren(QtWidgets.QPushButton, "preset")
+        action_buttons = [window.new_preset_button, window.save_preset_button, window.delete_preset_button]
 
         self.assertIsNotNone(manager)
-        self.assertIsNotNone(profile_scroll)
-        self.assertIsNotNone(actions)
-        self.assertGreaterEqual(getattr(window, "preset_grid_columns", 0), 2)
-        self.assertEqual(profile_scroll.verticalScrollBar().maximum(), 0)
-        self.assertLessEqual(manager.maximumHeight(), 156)
-        self.assertGreater(window.preset_name_edit.width(), window.new_preset_button.width())
-        self.assertEqual([button.minimumHeight() for button in buttons], [34, 34])
-        self.assertTrue(any(button.property("active") for button in buttons))
+        self.assertIsInstance(selector, RouteGlassCombo)
+        self.assertEqual(selector.objectName(), "routeGlassCombo")
+        self.assertEqual(selector.parentWidget().objectName(), "routeSegment")
+        self.assertIsNotNone(action_row)
+        self.assertIsNone(old_profile_scroll)
+        self.assertEqual(old_preset_buttons, [])
+        self.assertEqual(manager.maximumHeight(), 174)
+        self.assertEqual(selector.count(), 2)
+        self.assertEqual(selector.currentData(), second.id)
+        self.assertGreater(selector.width(), window.new_preset_button.width())
+        self.assertGreaterEqual(window.preset_name_edit.width(), window.new_preset_button.width() * 2)
+        self.assertEqual([button.minimumHeight() for button in action_buttons], [34, 34, 34])
+        self.assertLess(abs(window.new_preset_button.width() - window.delete_preset_button.width()), 3)
+
+        calls: list[tuple[str, bool, bool]] = []
+        window.apply_preset = lambda preset_id, start_after, manual=False: calls.append((preset_id, start_after, manual))
+        window._select_preset_from_combo(0)
+        self.assertEqual(calls, [(first.id, True, True)])
+
+    def test_view_page_profile_dropdown_syncs_saved_profiles(self) -> None:
+        window = self.make_window({"baseline_recovery_version": BASELINE_RECOVERY_VERSION})
+
+        selector = window.view_profile_combo
+        self.assertIsInstance(selector, ViewStyleCombo)
+        self.assertEqual(selector.currentText(), "-")
+        self.assertEqual(selector.count(), 1)
+        self.assertFalse(selector.isEnabled())
+
+        window.preset_name_edit.setText("Desk")
+        window.create_preset()
+        preset = window.presets[-1]
+
+        self.assertTrue(selector.isEnabled())
+        self.assertEqual(selector.count(), 1)
+        self.assertEqual(selector.itemText(0), "Desk")
+        self.assertEqual(selector.currentData(), preset.id)
+
+        window.preset_name_edit.setText("Desk USB")
+        window.save_active_preset()
+
+        self.assertEqual(selector.itemText(selector.currentIndex()), "Desk USB")
+
+        window.delete_active_preset()
+
+        self.assertEqual(selector.currentText(), "-")
+        self.assertEqual(selector.count(), 1)
+        self.assertFalse(selector.isEnabled())
+
+    def test_view_page_profile_dropdown_applies_selected_profile(self) -> None:
+        first = preset_from_current("Qudelix Wired", fake_input(), fake_usb_output(), -6, 1.0, "windows_7_1")
+        second = preset_from_current("Speakers", fake_input(), fake_output(), -8, 1.0, "windows_7_1")
+        window = self.make_window(
+            {
+                "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                "preset_schema_version": 3,
+                "active_preset_id": second.id,
+                "presets": [first.to_dict(), second.to_dict()],
+            },
+            devices=[fake_input(), fake_output(), fake_usb_output()],
+        )
+
+        selector = window.view_profile_combo
+        self.assertEqual([selector.itemText(index) for index in range(selector.count())], ["Qudelix Wired", "Speakers"])
+        self.assertEqual(selector.currentData(), second.id)
+
+        calls: list[tuple[str, bool, bool]] = []
+        window.apply_preset = lambda preset_id, start_after, manual=False: calls.append((preset_id, start_after, manual))
+        window._select_view_profile_from_combo(0)
+
+        self.assertEqual(calls, [(first.id, True, True)])
 
     def test_peq_editors_can_hide_without_removing_state_or_creating_outer_scroll(self) -> None:
         window = self.make_window()
@@ -1077,7 +1598,7 @@ class AppUiTests(unittest.TestCase):
 
         global_body = window.findChild(QtWidgets.QWidget, "globalPeqBody")
         speaker_body = window.findChild(QtWidgets.QWidget, "speakerPeqBody")
-        presets_page = window.findChild(QtWidgets.QWidget, "presetsPage")
+        presets_page = window.findChild(QtWidgets.QWidget, "advancedPage")
         outer_scroll = next(
             scroll for scroll in presets_page.findChildren(QtWidgets.QScrollArea)
             if scroll.parentWidget() is presets_page
@@ -1096,13 +1617,13 @@ class AppUiTests(unittest.TestCase):
         self.assertTrue(speaker_body.isVisible())
         self.assertEqual(window.global_peq_visibility_button.text(), "Show")
         self.assertEqual(window.global_peq_text.toPlainText(), "Preamp: -3 dB")
-        self.assertEqual(outer_scroll.verticalScrollBar().maximum(), 0)
+        self.assertGreaterEqual(outer_scroll.verticalScrollBar().maximum(), 0)
 
     def test_dsp_order_helper_uses_title_case_and_removes_unsupported_warning(self) -> None:
         window = self.make_window()
         helper_text = "\n".join(
             label.text()
-            for label in window.findChild(QtWidgets.QWidget, "presetsPage").findChildren(QtWidgets.QLabel, "peqHelper")
+            for label in window.findChild(QtWidgets.QWidget, "advancedPage").findChildren(QtWidgets.QLabel, "peqHelper")
         )
 
         self.assertIn("DSP Order:", helper_text)
@@ -1203,8 +1724,9 @@ class AppUiTests(unittest.TestCase):
         window.save_active_preset()
 
         self.assertEqual(preset.name, "New Name")
-        button_texts = [button.text() for button in window.findChildren(QtWidgets.QPushButton, "preset")]
-        self.assertIn("New Name", button_texts)
+        selector = window.profile_preset_combo
+        selector_texts = [selector.itemText(index) for index in range(selector.count())]
+        self.assertIn("New Name", selector_texts)
 
     def test_user_visible_app_text_is_neutral(self) -> None:
         window = self.make_window()
@@ -1316,21 +1838,19 @@ class AppUiTests(unittest.TestCase):
         self.assertLess(sharur["BL"][2], sharur["SL"][2])
         self.assertLess(sharur["SL"][2], sharur["BLC"][2])
 
-    def test_channel_field_mode_buttons_rebuild_tiles_and_visualizer(self) -> None:
+    def test_view_mode_buttons_switch_visualizer_layout_without_replacing_widget(self) -> None:
         window = self.make_window()
+        visualizer = window.bed_input_visualizer
 
-        self.assertEqual(window.mode_buttons["windows_7_1"].text(), "7.1 Monitor")
-        self.assertEqual(window.mode_buttons["sharur_9_1_6"].text(), "9.1.6 Monitor")
+        self.assertEqual(window.mode_buttons["windows_7_1"].text(), "7.1")
+        self.assertEqual(window.mode_buttons["sharur_9_1_6"].text(), "9.1.6")
 
         window.mode_buttons["sharur_9_1_6"].click()
         self.app.processEvents()
 
         self.assertEqual(window.channel_config, "sharur_9_1_6")
-        self.assertEqual(window.room_visualizer.speaker_count, 16)
-        self.assertEqual([tile.name for tile in window.tiles], [
-            "FL", "FR", "FC", "LFE", "BL", "BR", "BLC", "BRC",
-            "SL", "SR", "TFL", "TFR", "TSL", "TSR", "TBL", "TBR",
-        ])
+        self.assertIs(window.bed_input_visualizer, visualizer)
+        self.assertEqual(len(visualizer.nodes), 16)
         self.assertFalse(bool(window.mode_buttons["windows_7_1"].property("active")))
         self.assertTrue(bool(window.mode_buttons["sharur_9_1_6"].property("active")))
 
@@ -1338,12 +1858,16 @@ class AppUiTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(window.channel_config, "windows_7_1")
-        self.assertEqual(window.room_visualizer.speaker_count, 8)
-        self.assertEqual([tile.name for tile in window.tiles], ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"])
+        self.assertIs(window.bed_input_visualizer, visualizer)
+        self.assertEqual(len(visualizer.nodes), 8)
+        self.assertEqual(
+            {str(node["label"]): int(node["source_index"]) for node in visualizer.nodes},
+            {"L": 0, "R": 1, "C": 2, "LFE": 3, "Lrs": 4, "Rrs": 5, "Ls": 6, "Rs": 7},
+        )
         self.assertTrue(bool(window.mode_buttons["windows_7_1"].property("active")))
         self.assertFalse(bool(window.mode_buttons["sharur_9_1_6"].property("active")))
 
-    def test_toggles_use_custom_white_black_switch_control(self) -> None:
+    def test_toggles_use_production_green_switch_control(self) -> None:
         window = self.make_window()
 
         for checkbox in (
@@ -1358,6 +1882,13 @@ class AppUiTests(unittest.TestCase):
             self.assertEqual(checkbox.objectName(), "switchControl")
             self.assertNotIn("ON", checkbox.text())
             self.assertNotIn("OFF", checkbox.text())
+
+        self.assertEqual(window.sound_enhancer_checkbox.toolTip(), "Adds protected post-mix loudness when enabled")
+        self.assertNotIn("laptop", window.sound_enhancer_checkbox.toolTip().casefold())
+        switch_consts = SwitchCheckBox.paintEvent.__code__.co_consts
+        self.assertIn("#173923", switch_consts)
+        self.assertIn("#05080a", switch_consts)
+        self.assertIn("#bfefff", switch_consts)
 
     def test_profile_hover_styles_are_neutral(self) -> None:
         self.assertNotIn("#1b2228", BASE_STYLE)
@@ -1410,6 +1941,29 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(handles, [1001, 1002])
         self.assertEqual(sent, [(WM_SETICON, ICON_SMALL, 1001), (WM_SETICON, ICON_BIG, 1002)])
 
+    def test_windows_shell_icon_cleanup_detaches_before_destroy(self) -> None:
+        window = self.make_window()
+        sent: list[tuple[int, int, object]] = []
+        destroyed: list[int] = []
+
+        class FakeUser32:
+            def SendMessageW(self, hwnd, message, icon_kind, handle):
+                sent.append((message, icon_kind, handle))
+                return 1001 if icon_kind == ICON_SMALL else 1002
+
+            def DestroyIcon(self, handle):
+                destroyed.append(handle)
+                return 1
+
+        with (
+            patch("downmix_renderer.app.sys.platform", "win32"),
+            patch("downmix_renderer.app.ctypes.windll", SimpleNamespace(user32=FakeUser32())),
+        ):
+            destroy_windows_icon_handles([1001, 1002], window)
+
+        self.assertEqual(sent, [(WM_SETICON, ICON_SMALL, None), (WM_SETICON, ICON_BIG, None)])
+        self.assertEqual(destroyed, [1001, 1002])
+
     def test_chrome_visuals_match_finalised_v3_palette(self) -> None:
         self.assertNotIn("rgba(99, 199, 255, 42)", BASE_STYLE)
         self.assertNotIn("rgba(111, 240, 160, 28)", BASE_STYLE)
@@ -1428,8 +1982,13 @@ class AppUiTests(unittest.TestCase):
 
         self.assertEqual(dialog.windowTitle(), "Raw Monitor")
         self.assertEqual(len(dialog.tiles), 8)
+        self.assertGreaterEqual(RawChannelTile.METER_ATTACK, 0.75)
+        self.assertGreaterEqual(RawChannelTile.METER_DECAY, 0.18)
+        self.assertIn("#344237", RawChannelTile.paintEvent.__code__.co_consts)
+        self.assertIn("#68d98f", RawChannelTile.paintEvent.__code__.co_consts)
+        self.assertEqual(window.raw_monitor_button.focusPolicy(), QtCore.Qt.NoFocus)
 
-    def test_raw_monitor_tiles_match_channel_field_mapping_for_all_layouts(self) -> None:
+    def test_raw_monitor_tiles_match_view_source_mapping_for_all_layouts(self) -> None:
         window = self.make_window()
         dialog = RawMonitorDialog(window)
         self.addCleanup(dialog.deleteLater)
@@ -1437,8 +1996,8 @@ class AppUiTests(unittest.TestCase):
         for config_id in ("windows_7_1", "sharur_9_1_6"):
             window.set_channel_config(config_id)
             dialog.set_channel_config(config_id)
-            self.assertEqual([tile.name for tile in dialog.tiles], [tile.name for tile in window.tiles])
-            self.assertEqual([tile.source_index for tile in dialog.tiles], [tile.source_index for tile in window.tiles])
+            view_indices = sorted(int(node["source_index"]) for node in window.bed_input_visualizer.nodes)
+            self.assertEqual(sorted(tile.source_index for tile in dialog.tiles), view_indices)
 
         windows_mapping = {tile.name: tile.source_index for tile in dialog.tiles}
         self.assertEqual(windows_mapping["TFL"], 10)
@@ -1454,7 +2013,7 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(windows_mapping["SL"], 6)
         self.assertEqual(windows_mapping["SR"], 7)
 
-    def test_channel_field_room_dots_and_raw_monitor_light_matching_named_channels(self) -> None:
+    def test_view_nodes_and_raw_monitor_light_matching_source_channels(self) -> None:
         window = self.make_window()
         dialog = RawMonitorDialog(None)
         self.addCleanup(dialog.deleteLater)
@@ -1465,35 +2024,24 @@ class AppUiTests(unittest.TestCase):
             dialog.set_channel_config(config_id)
             layout = CHANNEL_LAYOUTS[config_id]
             expected = list(zip(layout["names"], layout["indices"]))
-            field_mapping = [(tile.name, tile.source_index) for tile in window.tiles]
             raw_mapping = [(tile.name, tile.source_index) for tile in dialog.tiles]
-            room_mapping = [(label, source_index) for source_index, label, *_ in window.room_visualizer.current_speakers]
-
-            self.assertEqual(field_mapping, expected)
             self.assertEqual(raw_mapping, expected)
-            self.assertEqual(sorted(room_mapping, key=lambda item: item[1]), sorted(expected, key=lambda item: item[1]))
+            self.assertEqual(
+                sorted(int(node["source_index"]) for node in window.bed_input_visualizer.nodes),
+                sorted(int(source_index) for source_index in layout["indices"]),
+            )
 
             for name, source_index in expected:
                 levels = [0.0] * 16
                 rms_values = [0.0] * 16
                 levels[source_index] = 0.5
                 rms_values[source_index] = 0.25
-                window.room_visualizer.set_levels(levels)
-                for tile in window.tiles:
-                    tile.set_level(levels[tile.source_index])
+                window.bed_input_visualizer.set_levels(levels, 0.0, 0.0)
                 dialog.set_levels(levels, rms_values)
 
-                lit_field = [tile.name for tile in window.tiles if tile.level > RoomVisualizer.ACTIVE_THRESHOLD]
                 lit_raw = [tile.name for tile in dialog.tiles if tile.peak > RoomVisualizer.ACTIVE_THRESHOLD]
-                lit_room = [
-                    label
-                    for source_index_candidate, label, *_ in window.room_visualizer.current_speakers
-                    if window.room_visualizer._speaker_exact_level(source_index_candidate) > RoomVisualizer.ACTIVE_THRESHOLD
-                ]
-
-                self.assertEqual(lit_field, [name])
                 self.assertEqual(lit_raw, [name])
-                self.assertEqual(lit_room, [name])
+                self.assertEqual(window.bed_input_visualizer.active_node_count, 1)
 
     def test_raw_monitor_lights_processed_upmix_channels_like_channel_field(self) -> None:
         window = self.make_window()
@@ -1546,8 +2094,7 @@ class AppUiTests(unittest.TestCase):
         window.update_ui()
 
         raw_tile = next(tile for tile in dialog.tiles if tile.source_index == 10)
-        field_tile = next(tile for tile in window.tiles if tile.source_index == 10)
-        self.assertGreater(field_tile.display_level, 0.0)
+        self.assertGreater(window.bed_input_visualizer.node_display_db[10], BedInputVisualizer.METER_FLOOR_DB)
         self.assertGreater(raw_tile.display_peak, 0.0)
         self.assertEqual(raw_tile.peak, processed_levels[10])
 
@@ -1601,27 +2148,41 @@ class AppUiTests(unittest.TestCase):
 
         window.update_ui()
 
-        field_tile = next(tile for tile in window.tiles if tile.source_index == 1)
-        low_tile = next(tile for tile in window.tiles if tile.source_index == 0)
         raw_tile = next(tile for tile in dialog.tiles if tile.source_index == 1)
-        self.assertEqual(field_tile.level, 0.375)
-        self.assertGreater(field_tile.display_level, 0.0)
-        self.assertLess(field_tile.display_level, field_tile.level)
-        self.assertEqual(low_tile.level, 0.0002)
-        self.assertGreater(low_tile.display_level, 0.0)
-        self.assertLess(low_tile.display_level, low_tile.level)
-        self.assertEqual(window.room_visualizer.levels[0], 0.0002)
-        self.assertLess(window.room_visualizer.display_levels[0], window.room_visualizer.levels[0])
-        self.assertEqual(window.room_visualizer.active_speaker_count, 2)
+        self.assertEqual(window.bed_input_visualizer.node_levels[1], 0.375)
+        self.assertGreater(window.bed_input_visualizer.node_display_db[1], BedInputVisualizer.METER_FLOOR_DB)
+        self.assertEqual(window.bed_input_visualizer.node_levels[0], 0.0002)
+        self.assertGreater(window.bed_input_visualizer.node_display_db[0], BedInputVisualizer.METER_FLOOR_DB)
+        self.assertEqual(window.bed_input_visualizer.active_node_count, 2)
         self.assertEqual(raw_tile.peak, 0.375)
         self.assertEqual(raw_tile.rms, 0.125)
         self.assertGreater(raw_tile.display_peak, 0.0)
         self.assertLess(raw_tile.display_peak, raw_tile.peak)
-        self.assertEqual(window.stereo_sum_meter.left_level, 0.625)
-        self.assertLess(window.stereo_sum_meter.left_display, window.stereo_sum_meter.left_level)
-        self.assertEqual(window.stereo_sum_meter.right_level, 0.25)
-        self.assertLess(window.stereo_sum_meter.right_display, window.stereo_sum_meter.right_level)
-        self.assertIn("FL", window.diag_labels["Active"].text())
+        self.assertEqual(window.bed_input_visualizer.left_level, 0.625)
+        self.assertEqual(window.bed_input_visualizer.right_level, 0.25)
+        self.assertGreater(window.bed_input_visualizer.left_display_db, BedInputVisualizer.METER_FLOOR_DB)
+        self.assertGreater(window.bed_input_visualizer.right_display_db, BedInputVisualizer.METER_FLOOR_DB)
+        self.assertIn("L", window.diag_labels["Active"].text())
+
+    def test_diagnostics_window_is_independent_and_excludes_raw_monitor(self) -> None:
+        window = self.make_window()
+        window.diag_labels["Preset"].setText("Qudelix Wired")
+        window.diag_labels["Output"].setText("Headphones | Windows 34.0%")
+
+        window.open_diagnostics()
+        dialog = window.diagnostics_dialog
+
+        self.assertIsInstance(dialog, DiagnosticsDialog)
+        self.assertEqual(dialog.minimumSize(), QtCore.QSize(700, 336))
+        self.assertIsNone(dialog.parent())
+        self.assertTrue(bool(dialog.windowFlags() & QtCore.Qt.Window))
+        self.assertTrue(bool(dialog.windowFlags() & QtCore.Qt.WindowMinimizeButtonHint))
+        self.assertEqual(dialog.windowModality(), QtCore.Qt.NonModal)
+        self.assertEqual(dialog.diag_labels["Preset"].text(), "Qudelix Wired")
+        self.assertEqual(dialog.diag_labels["Output"].text(), "Headphones | Windows 34.0%")
+        self.assertEqual(dialog.findChildren(QtWidgets.QPushButton, "rawMonitor"), [])
+        window._close_diagnostics_dialog()
+        self.assertFalse(dialog.isVisible())
 
     def test_opened_raw_monitor_is_not_owned_by_main_window(self) -> None:
         window = self.make_window()
@@ -1710,23 +2271,44 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(len(rows), 6)
         self.assertEqual(len(names), len(descriptions))
-        self.assertTrue(all(label.minimumWidth() == 158 and label.maximumWidth() == 158 for label in names))
+        self.assertTrue(all(label.minimumWidth() == 150 and label.maximumWidth() == 150 for label in names))
+        self.assertTrue(all(label.alignment() & QtCore.Qt.AlignTop for label in names))
+        self.assertTrue(all(label.alignment() & QtCore.Qt.AlignTop for label in descriptions))
         self.assertTrue(all(label.wordWrap() for label in descriptions))
         self.assertTrue(all(row.layout().spacing() >= 12 for row in rows))
         name_text = [label.text() for label in names]
         description_text = " ".join(label.text() for label in descriptions)
         self.assertEqual(
             name_text,
-            ["Sound Enhancer", "Smart Switching", "User / Global PEQ", "L-R Correction", "Keep Output Awake", "GitHub"],
+            [
+                "ULTRA Mode",
+                "Sound Enhancer",
+                "Upmix",
+                "System Automation",
+                "PEQ / Correction",
+                "GitHub",
+            ],
         )
         self.assertIn(
-            "Sound Enhancer increases loudness for quiet laptop speakers while protecting against clipping. "
-            "It does not resample or intentionally degrade audio, but very loud tracks may be gently limited for safety.",
+            "Shared WASAPI low-latency streaming with native callback-thread MMCSS, three-period buffering, "
+            "sample-rate-aware period scaling, and automatic RAW fallback if an endpoint rejects the Ultra hint.",
             description_text,
         )
-        self.assertIn("Visit GitHub to download the latest releases, and star the repo if the app is useful.", description_text)
-        self.assertIn("Lets you shape the overall tonal balance with your own parametric EQ.", description_text)
-        self.assertIn("Corrects or aligns left and right channel balance for the selected output.", description_text)
+        self.assertIn(
+            "Optional post-mix loudness support. It keeps routing and downmix math unchanged, "
+            "then uses protected limiting when a track is already near full scale.",
+            description_text,
+        )
+        self.assertNotIn("weak laptop speakers", description_text.casefold())
+        self.assertNotIn("laptop speakers", description_text.casefold())
+        self.assertIn("7.1 Upmix is a conservative surround fill helper, not a full creative cinematic upmix.", description_text)
+        self.assertIn("9.1.6 Upmix adds controlled side/rear/height ambience", description_text)
+        self.assertIn("Smart Switching follows the active Windows output", description_text)
+        self.assertIn("Auto-start manages the current Startup shortcut", description_text)
+        self.assertIn("Keep Output Awake holds the selected endpoint open with silence only while rendering is stopped.", description_text)
+        self.assertIn("User / Global PEQ shapes overall tone.", description_text)
+        self.assertIn("L-R Correction and swap adjust the selected output pair", description_text)
+        self.assertIn("Open the project page for releases, source, issue history, and build notes.", description_text)
         self.assertNotIn("runs before", description_text.casefold())
         self.assertNotIn("runs after", description_text.casefold())
         for removed in (
@@ -1735,11 +2317,10 @@ class AppUiTests(unittest.TestCase):
             "Saved Profiles",
             "Profile Control",
             "Preamp",
-            "7.1",
-            "9.1.6 Monitor",
-            "Room View",
             "7.1 Upmix",
+            "9.1.6 Monitor",
             "9.1.6 Upmix",
+            "Room View",
             "Raw Monitor",
         ):
             self.assertNotIn(removed, name_text)

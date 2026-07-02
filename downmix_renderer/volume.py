@@ -20,6 +20,9 @@ class VolumeFollower(Protocol):
     def get_state(self) -> VolumeState:
         ...
 
+    def prepare_output_endpoint(self, endpoint_id: str | None) -> None:
+        ...
+
     def set_output_endpoint_id(self, endpoint_id: str | None) -> None:
         ...
 
@@ -33,6 +36,9 @@ class NullVolumeFollower:
 
     def get_state(self) -> VolumeState:
         return VolumeState(1.0, False, False, "none", self.detail)
+
+    def prepare_output_endpoint(self, endpoint_id: str | None) -> None:
+        return None
 
     def set_output_endpoint_id(self, endpoint_id: str | None) -> None:
         return None
@@ -54,6 +60,9 @@ class PycawVolumeFollower:
             return self._read_state()
 
     def set_output_endpoint_id(self, endpoint_id: str | None) -> None:
+        return None
+
+    def prepare_output_endpoint(self, endpoint_id: str | None) -> None:
         return None
 
     def close(self) -> None:
@@ -136,6 +145,29 @@ class WindowsEndpointVolumeFollower:
         except Exception:
             pass
 
+    def prepare_output_endpoint(self, endpoint_id: str | None) -> None:
+        target = str(endpoint_id or "").strip()
+        if not target:
+            return
+
+        enumerator = None
+        device = None
+        endpoint = None
+        try:
+            enumerator = self._create_enumerator()
+            device = self._device_for_endpoint_id(enumerator, target)
+            endpoint = self._activate_endpoint_volume(device)
+            self._set_endpoint_volume(endpoint, 1.0, False)
+        except Exception:
+            return
+        finally:
+            for pointer in (endpoint, device, enumerator):
+                if pointer:
+                    try:
+                        self._release(pointer)
+                    except Exception:
+                        pass
+
     def get_state(self) -> VolumeState:
         try:
             return self._read_state()
@@ -193,31 +225,12 @@ class WindowsEndpointVolumeFollower:
         self._enumerator = ctypes.c_void_p()
 
     def _create_endpoint(self) -> None:
-        hr = self._ole32.CoCreateInstance(
-            ctypes.byref(self.CLSID_MMDEVICE_ENUMERATOR),
-            None,
-            self.CLSCTX_ALL,
-            ctypes.byref(self.IID_IMMDEVICE_ENUMERATOR),
-            ctypes.byref(self._enumerator),
-        )
-        self._check_hr(hr, "CoCreateInstance(IMMDeviceEnumerator)")
+        self._enumerator = self._create_enumerator()
 
         selected_error = ""
         if self._target_endpoint_id:
             try:
-                get_device = self._method(
-                    self._enumerator,
-                    5,
-                    ctypes.HRESULT,
-                    ctypes.c_wchar_p,
-                    ctypes.POINTER(ctypes.c_void_p),
-                )
-                hr = get_device(
-                    self._enumerator,
-                    ctypes.c_wchar_p(self._target_endpoint_id),
-                    ctypes.byref(self._device),
-                )
-                self._check_hr(hr, "IMMDeviceEnumerator.GetDevice")
+                self._device = self._device_for_endpoint_id(self._enumerator, self._target_endpoint_id)
                 self._endpoint_detail = "Selected output endpoint"
             except Exception as exc:
                 selected_error = str(exc)
@@ -234,8 +247,41 @@ class WindowsEndpointVolumeFollower:
             if selected_error:
                 self._endpoint_detail = f"{self._endpoint_detail}; selected unavailable: {selected_error}"
 
+        self._endpoint = self._activate_endpoint_volume(self._device)
+
+    def _create_enumerator(self):
+        enumerator = ctypes.c_void_p()
+        hr = self._ole32.CoCreateInstance(
+            ctypes.byref(self.CLSID_MMDEVICE_ENUMERATOR),
+            None,
+            self.CLSCTX_ALL,
+            ctypes.byref(self.IID_IMMDEVICE_ENUMERATOR),
+            ctypes.byref(enumerator),
+        )
+        self._check_hr(hr, "CoCreateInstance(IMMDeviceEnumerator)")
+        return enumerator
+
+    def _device_for_endpoint_id(self, enumerator, endpoint_id: str):
+        device = ctypes.c_void_p()
+        get_device = self._method(
+            enumerator,
+            5,
+            ctypes.HRESULT,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        hr = get_device(
+            enumerator,
+            ctypes.c_wchar_p(endpoint_id),
+            ctypes.byref(device),
+        )
+        self._check_hr(hr, "IMMDeviceEnumerator.GetDevice")
+        return device
+
+    def _activate_endpoint_volume(self, device):
+        endpoint = ctypes.c_void_p()
         activate = self._method(
-            self._device,
+            device,
             3,
             ctypes.HRESULT,
             ctypes.POINTER(_GUID),
@@ -244,13 +290,22 @@ class WindowsEndpointVolumeFollower:
             ctypes.POINTER(ctypes.c_void_p),
         )
         hr = activate(
-            self._device,
+            device,
             ctypes.byref(self.IID_IAUDIO_ENDPOINT_VOLUME),
             self.CLSCTX_ALL,
             None,
-            ctypes.byref(self._endpoint),
+            ctypes.byref(endpoint),
         )
         self._check_hr(hr, "IMMDevice.Activate(IAudioEndpointVolume)")
+        return endpoint
+
+    def _set_endpoint_volume(self, endpoint, scalar: float, muted: bool) -> None:
+        set_scalar = self._method(endpoint, 7, ctypes.HRESULT, ctypes.c_float, ctypes.c_void_p)
+        set_mute = self._method(endpoint, 14, ctypes.HRESULT, ctypes.c_int, ctypes.c_void_p)
+        hr = set_scalar(endpoint, ctypes.c_float(_clamp_scalar(scalar)), None)
+        self._check_hr(hr, "IAudioEndpointVolume.SetMasterVolumeLevelScalar")
+        hr = set_mute(endpoint, ctypes.c_int(1 if muted else 0), None)
+        self._check_hr(hr, "IAudioEndpointVolume.SetMute")
 
     def _create_default_render_device(self) -> None:
         get_default = self._method(

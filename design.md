@@ -1,6 +1,6 @@
 # Downmix Renderer Design System
 
-Last updated: 2026-06-21
+Last updated: 2026-06-29
 
 ## Design Intent
 
@@ -11,6 +11,7 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Primary surface: OLED black with restrained near-black panels.
 - Accent language: white/gray contrast, soft green status for active audio, muted red only for stopped/error states.
 - Backdrop: subtle animated wavy-dot field with cursor-reactive movement. The root window paints the live field across exposed Qt chrome, including the tabs/header area. The OS title bar is not custom-painted; it uses Windows dark-titlebar integration where available so native minimize/close behavior remains reliable.
+- Signal visuals: reserve yellow for meters/signal intensity. Spatial nodes and Channels capsules share source-group colors and dB-based variation, rendered with darker OLED-style composition. Capsule gradients and glows must stay clipped inside the capsule shape.
 - Cards: compact 8 px radius panels for repeated controls only. Do not nest cards inside cards.
 - Typography: Segoe UI/Inter/Arial, compact dashboard sizing, no viewport-scaled type, no negative letter spacing.
 - Assets: use the local logo/icon files in `assets/`; do not introduce external image dependencies for the shell.
@@ -20,8 +21,9 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - The first screen is the actual renderer, not a landing page.
 - The route lane owns routing actions: fixed `CABLE Input`, output device, compact sample rate, and a refresh icon.
 - Keep output/session controls close to renderer state, not hidden in debug tooling.
+- The View page control order is `7.1`, `9.1.6`, saved-profile selector, then Spatial/Channels selector. The saved-profile selector is name-only and uses `-` as its empty state.
 - Main renderer columns remain stable at launch size and high DPI; Qt high-DPI scaling is configured before app creation, and fixed-format controls use explicit heights and minimum widths to avoid layout jumps.
-- The Presets tab keeps profile management and PEQ/correction controls together because those values are saved as one profile surface.
+- The Advanced tab keeps profile management and PEQ/correction controls together because those values are saved as one profile surface.
 - Diagnostic text can wrap, but controls should not resize due to changing meter/status text.
 
 ## Motion And Performance
@@ -31,6 +33,7 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Room visualizer: faster while idle, relaxed while rendering to reduce GPU/DWM contention.
 - PEQ parsing is debounced and never runs directly from audio callbacks.
 - Animations are short, non-blocking Qt animations. Avoid heavy effects, blurs, particle systems, or continuous repaints outside the existing clipped regions.
+- Capsule, Spatial-node, and meter refinements must stay paint-only and must not change preference handling, meter smoothing, DSP snapshots, or routing decisions. Level feedback can strengthen fill, border, and contained glow, but it must keep the existing channel color scheme and geometry.
 - The measured steady-state UI loop is far below the 40 ms timer budget. Do not add always-on work to `update_ui()` unless it has before/after measurements and visible user benefit.
 - Use Qt `update()`/timer-driven repaint scheduling rather than `repaint()` or blocking waits, so Qt can coalesce paint events and keep interactions fluid.
 
@@ -43,18 +46,20 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 - Numeric audio values use sliders or constrained line edits with clamping.
 - Route combo popups use the themed route view and show enough items to avoid cramped scroll affordances.
 - The header status says `Shared WASAPI | Ready` or `Shared WASAPI | ULTRA Mode` because the production backend uses WASAPI shared mode.
-- Renderer details are a compact, content-sized support dialog with one aligned label/detail grid and no bottom stretch or placeholder action buttons.
+- Renderer details are a compact, content-sized support dialog with one aligned label/detail grid, consolidated rows for related toggles, and no bottom stretch or placeholder action buttons.
 
 ## Window Behavior
 
 - Main window: native Windows frame with dark-titlebar integration where supported. Keep native minimize, maximize, close, drag, focus, and taskbar behavior intact. The process AppUserModelID, embedded icon, and small/big window icons must be set before first-launch taskbar validation.
 - Raw Monitor: independent top-level non-modal window with its own title, minimize, and close controls. It is not parent-owned by the main renderer, so minimizing the renderer does not minimize Raw Monitor. It follows the active monitor layout and uses the same source-index mapping as Channel Field.
-- Application shutdown: the main renderer still closes Raw Monitor deliberately so the process exits cleanly.
+- Application shutdown: the main renderer still closes Raw Monitor deliberately so the process exits cleanly. Premium dropdown delegates must release popup event filters before Qt teardown; this avoids shutdown faults while preserving the same dropdown visuals and behavior.
 - Renderer details/help dialogs may stay parented to the main window because they are transient support surfaces.
 
 ## Audio-Safety Constraints
 
 - Do not change matrix coefficients, LFE delay behavior, limiter behavior, PEQ math, channel trim semantics, or native/Python DSP parity unless fixing a verified audio bug.
+- 7.1 Upmix is a conservative side/rear fill helper, not a full creative cinematic upmix.
+- 9.1.6 Upmix must remain source-driven: fill missing side/rear/height channels from surround energy or stereo width, keep center-only and mono-front content from lighting synthetic channels, avoid synthetic LFE, and mirror every DSP change in Python and native C++.
 - Loudness enhancement must stay optional, post-mix, bounded by safety limiting, and mirrored between Python and native DSP.
 - UI polish must not add dependencies or move work onto the audio callback path.
 - Device refresh and recovery must reuse established route/device helpers rather than creating parallel enumeration flows. Automatic restart paths must respect the user stop state and the endpoint-aware current Windows default output identity.
@@ -64,6 +69,6 @@ Downmix Renderer is a focused Windows audio utility. The UI should feel premium,
 
 ## Documentation And Testing Expectations
 
-- Docs must describe the current local production-test artifact path: `production testing\Downmixrenderer.exe`.
+- Docs must describe the public release artifact path: `Downmix Renderer Software\Downmixrenderer.exe`.
 - Tests should cover UI construction, layout regressions, Raw Monitor independence, route refresh behavior, startup shortcut validation, DSP invariants, PEQ parsing, settings safety, and native/Python parity where the DLL is available.
 - Any future behavior change should start with a regression test that fails for the old behavior and passes for the new behavior.

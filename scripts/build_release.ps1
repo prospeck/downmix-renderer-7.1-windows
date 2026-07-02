@@ -1,5 +1,5 @@
 param(
-    [string]$DistName = "Finalised Version",
+    [string]$DistName = "Downmix Renderer Software",
     [switch]$Sign
 )
 

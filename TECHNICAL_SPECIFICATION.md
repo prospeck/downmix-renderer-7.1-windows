@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-21
 
-Current local production-test artifact: `production testing\Downmixrenderer.exe`
+Current public release artifact: `Downmix Renderer Software\Downmixrenderer.exe`
 
 Executable name: `Downmixrenderer.exe`
 
@@ -197,7 +197,7 @@ The layout selector changes meter/visualizer interpretation and the matrix input
 
 ### 3.6 7.1 Surround Fill
 
-Surround fill is an optional Windows 7.1 repair helper. It detects active back channels with silent side channels and splits the back signal between back and side positions:
+Surround fill is an optional Windows 7.1 repair helper, not a full creative or cinematic upmix. It detects active back channels with silent side channels and splits the back signal between back and side positions. The intent is to help common 5.1 playback feel wider on a 7.1 monitor path without changing the matrix, tonality, or LFE behavior:
 
 ```text
 if BL active and SL silent:
@@ -213,7 +213,7 @@ Activity threshold: `1e-4`
 
 ### 3.7 9.1.6 Monitor Upmix
 
-The 9.1.6 monitor path can synthesize missing BLC/BRC and height channels from an 8-channel Windows 7.1 bed. It does not run when the input layout is already a Sharur 9.1.6 input.
+The 9.1.6 monitor path can synthesize missing side, BLC/BRC, and height channels from an 8-channel Windows 7.1 bed. It does not run when the input layout is already a Sharur 9.1.6 input.
 
 Generated-channel gain: `0.5011872336272722` (approximately -6 dB)
 
@@ -224,6 +224,16 @@ Generation uses:
 - High-pass "air" extraction around 3.5 kHz.
 - High-pass/low-pass shaping for generated channels.
 - Small shelf boosts on selected height bands.
+
+9.1.6 generation is gated by meaningful surround or stereo-width activity. Center-only and mono-front program material does not mark the generated field active, so the view does not show constantly lit synthetic channels. When 5.1-style material has active `BL/BR` but silent `SL/SR`, the generator creates controlled `SL/SR` side energy from the surround bed before deriving rear-center and height ambience.
+
+Design constraints:
+
+- Preserve real front, center, LFE, side, and height input channels.
+- Do not synthesize LFE or alter bass management.
+- Do not overwrite true Sharur 9.1.6 inputs.
+- Keep generated channels low-level, shaped, and source-driven rather than duplicating the same signal everywhere.
+- Keep Python and native C++ DSP behavior in parity.
 
 ### 3.8 Channel Sanity Guard
 
@@ -618,7 +628,7 @@ right *= trim_right_gain
 
 ### 5.10 Sound Enhancer
 
-Sound Enhancer is an optional post-mix loudness stage intended for quiet laptop speakers. It runs after matrix, preamp, PEQ, L/R swap, speaker correction, and channel trim, and before the final limiter. It does not change routing, matrix coefficients, PEQ math, trim semantics, LFE timing, or channel mapping.
+Sound Enhancer is an optional protected post-mix loudness stage. It runs after matrix, preamp, PEQ, L/R swap, speaker correction, and channel trim, and before the final limiter. It does not change routing, matrix coefficients, PEQ math, trim semantics, LFE timing, or channel mapping.
 
 The stage uses fixed makeup gain plus a protected ceiling. Peak detection for this stage uses a lightweight 4x Catmull-Rom inter-sample estimate, so the safety envelope reacts to obvious between-sample overshoots instead of only raw sample peaks:
 
@@ -769,27 +779,26 @@ Native code dependencies:
 | `scripts/make_icon.py` | Build icon assets |
 | `tests/` | Unit tests for UI, DSP, native parity, PEQ, settings, presets, route probing, startup |
 | `assets/` | Production logo/icon assets used by UI and package |
-| `production testing/` | Current local production-test package folder, ignored by git |
+| `Downmix Renderer Software/` | Current public release package folder, ignored by git |
 
 ## 9. UI/UX Logic And Interaction Flow
 
-### 9.1 Main Renderer Tab
+### 9.1 View Tab
 
-The main tab is arranged into:
+The View tab is arranged into:
 
-- Route card: fixed `CABLE Input` presentation, output selector, compact sample-rate selector, and refresh icon action.
-- Transport card: render start/stop toggle and status.
-- Volume/preamp card: preamp control and display.
-- Keep-awake card: silent output stream option when renderer is stopped.
-- Channel card: live channel tiles and room visualizer.
-- Meter card: stereo sum meter.
-- Diagnostics card: route, stream, limiter, Sound Enhancer, active channels, output/volume, upmix/PEQ summaries.
+- Route lane: fixed `CABLE Input` presentation, output selector, compact sample-rate selector, render toggle, and refresh icon action.
+- View controls: `7.1` / `9.1.6` monitor mode buttons, compact saved-profile selector, and cluster/capsule input visualizer selector.
+- Saved-profile selector: displays saved profile names only, or `-` when no profiles exist. It calls the same `apply_preset(..., manual=True)` path as the Advanced saved-profile selector, so no parallel routing or preference behavior exists on the View page.
+- Live visualizer: signal-driven room cluster or capsule layout using the same channel mapping as the renderer. Spatial nodes keep their original meter-fraction response with darker OLED color composition; Channels capsules use the contained paint-only dB drive curve so channel intensity is visible without changing DSP snapshots, routing, or preferences.
+- Stereo sum meters: driven only by final left/right output meter values. Their existing floor, tick spacing, hold/release, clipping, and animation behavior are preserved; the high-level color stop is rendered through a darker OLED paint composition.
+- Compact status strip: route, layout, stream, limiter, Sound Enhancer, active channels, output/volume, and PEQ summaries.
 
 The UI refresh timer runs every 40 ms. It polls engine snapshots, applies stream self-heal checks, updates meters, channel tiles, diagnostics, and render toggle state.
 
-### 9.2 Presets Tab
+### 9.2 Advanced Tab
 
-The presets tab contains:
+The Advanced tab contains:
 
 - Saved profile list.
 - Profile creation/update/deletion controls.
@@ -808,7 +817,8 @@ The app uses:
 
 - Native Windows window controls with dark titlebar integration where available.
 - Custom-rendered toggle, meter, tile, room visualizer, and backdrop widgets.
-- The backdrop matches the `Finalised version 3` two-layer behavior: a live cursor-reactive root wavy-dot field across the Qt chrome plus the cinematic page overlay.
+- Premium route/profile dropdowns use custom popup delegates for smooth row feedback; the delegates detach their event filters during `QApplication.aboutToQuit` so Qt can tear down cleanly without changing dropdown visuals, routing behavior, or audio state.
+- The backdrop uses a two-layer behavior: a live cursor-reactive root wavy-dot field across the Qt chrome plus the cinematic page overlay.
 - Fusion Qt style with application stylesheet.
 - Local logo and icon assets.
 
@@ -902,8 +912,9 @@ Performance choices:
 
 - Native C++ backend is the production path.
 - Audio callback avoids Python execution in normal packaged operation.
-- Native WASAPI ULTRA mode uses a low-latency 128-frame period at 48 kHz with three periods, then scales frame count at 96 kHz and 192 kHz so GPU/DWM scheduling pressure does not shrink the callback deadline below the 48 kHz time budget.
-- UI animation work is throttled while rendering where it does not alter the `Finalised version 3` backdrop behavior, and backdrop repaint regions skip hidden/covered pixels to reduce GPU/DWM contention without changing DSP math or stream routing.
+- Native WASAPI ULTRA mode uses a low-latency 128-frame period hint at 48 kHz with three periods, then scales frame count at 96 kHz and 192 kHz so GPU/DWM scheduling pressure does not shrink the callback deadline below the 48 kHz time budget.
+- Windows/miniaudio may negotiate a different legal engine period for a specific endpoint. Diagnostics intentionally keep the stable requested-period display path so switching behavior stays identical to the last known-good native backend.
+- UI animation work is throttled while rendering where it does not alter the current backdrop behavior, and backdrop repaint regions skip hidden/covered pixels to reduce GPU/DWM contention without changing DSP math or stream routing.
 - DSP buffers are preallocated and resized outside steady-state operation.
 - Native configuration is shared through atomics and immutable PEQ config snapshots.
 - PEQ updates are published atomically and crossfaded, avoiding abrupt discontinuities.
@@ -922,13 +933,29 @@ Profiles:
 
 Native backend clamps requested block size between 64 and 4096 frames and reserves enough DSP capacity for eight blocks.
 
+Stability rationale:
+
+- Shared WASAPI is retained for normal Windows app coexistence. Exclusive-mode experiments remain out of scope because they can break Apple Music/browser/VLC coexistence and output-device switching expectations.
+- ULTRA asks for the pro-audio/low-latency path and disables automatic shared-mode SRC only for that first attempt. If a device rejects the format/period request, the engine retries RAW Mode with the compatibility path instead of forcing a bad route.
+- The native stream lifecycle intentionally avoids reading extra negotiated-period internals after stream initialization; this preserves the previously stable output-switching behavior while retaining the same requested period, period count, fallback, and recovery rules.
+- Three native periods are kept as the stable default because this is a duplex capture/playback renderer and the extra period gives the callback more room under DWM, GPU, browser, Bluetooth, and wake/sleep scheduling pressure.
+- The callback path does not allocate UI objects, enumerate devices, parse PEQ text, or run Python in packaged native operation. Recovery and device polling stay on the UI/main-thread side.
+
+Windows references reviewed:
+
+- Microsoft low-latency audio guidance: <https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/low-latency-audio>
+- WASAPI shared-mode period guidance: <https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient3-getsharedmodeengineperiod>
+- WASAPI low-latency shared stream initialization: <https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient3-initializesharedaudiostream>
+- MMCSS audio-thread registration: <https://learn.microsoft.com/en-us/windows/win32/api/avrt/nf-avrt-avsetmmthreadcharacteristicsw>
+- MMCSS thread priority: <https://learn.microsoft.com/en-us/windows/win32/api/avrt/nf-avrt-avsetmmthreadpriority>
+
 ### 11.3 UI Responsiveness
 
 The UI uses timers instead of blocking loops:
 
 - 40 ms UI refresh.
 - 500 ms device polling.
-- 70 ms live animated backdrop update matching `Finalised version 3`, with root/page repaint regions clipped to visible areas.
+- 70 ms live animated backdrop update, with root/page repaint regions clipped to visible areas.
 - Room visualizer animation relaxes from 55 ms idle to 90 ms while rendering.
 - 260 ms PEQ debounce.
 
@@ -943,6 +970,11 @@ Latest safe-harness measurements were taken with `DOWNMIX_RENDERER_AUDIO_BACKEND
 | Window construction | ~25 ms | ~28 ms | Dominated by normal Qt widget setup and initial device/settings mocks in the test harness |
 | `update_ui()` steady-state loop | ~0.065 ms | ~0.11 ms | Below the 40 ms UI timer budget by a wide margin |
 | Backdrop advance scheduling | ~0.0004 ms | ~0.0005 ms | Uses Qt `update()` so paint events are coalesced by Qt |
+| Capsule color palette calculation | ~0.027 ms | ~0.037 ms | Pure UI paint helper; no audio, routing, or settings path access |
+| Spatial visualizer offscreen render, 16 active channels at 1000x260 | ~3.3 ms | ~3.8 ms | Paint-only dB color/glow response; no audio or routing access |
+| Capsule visualizer offscreen render, 16 active channels at 1000x260 | ~3.6 ms | ~4.2 ms | Below the 40 ms UI refresh budget in the offscreen Qt harness |
+| Native 9.1.6 upmix DSP, 512-frame 5.1-style side-fill block | ~0.087 ms | ~0.093 ms | Native DLL path, generated `SL/SR` active, Python backend not involved |
+| Native 9.1.6 upmix DSP stress, 10,000 x 128-frame blocks | ~0.226 s total | n/a | Output remained finite with no limiter instability |
 | Lossless bridge retarget handoff | ~0.044 ms | ~0.06 ms | Retargets only the renderer bridge and reuses normal start/liveness checks |
 
 Optimization decision: no broad refactor is justified by these numbers. The most important performance rule is to keep blocking device enumeration, route probing, and startup shortcut work out of the steady UI path, while leaving the verified audio-routing state machine untouched. Future optimization proposals must include before/after measurements and regression coverage.
@@ -955,8 +987,8 @@ Current unit test coverage:
 
 | Test file | Focus |
 | --- | --- |
-| `tests/test_dsp.py` | Matrix constants, DSP gain staging, limiter, LFE delay, surround fill, upmix, PEQ crossfade |
-| `tests/test_native_dsp.py` | Native DLL trim behavior and native/Python DSP parity where available |
+| `tests/test_dsp.py` | Matrix constants, DSP gain staging, limiter, LFE delay, surround fill, 9.1.6 side/height upmix gating, PEQ crossfade |
+| `tests/test_native_dsp.py` | Native DLL trim behavior and native/Python DSP parity where available, including 9.1.6 side-fill and center-only gating |
 | `tests/test_peq.py` | PEQ parser, channel mapping, warnings, biquad generation |
 | `tests/test_audio_engine.py` | Engine startup validation, profile fallback, keep-awake behavior, backend selection |
 | `tests/test_app_ui.py` | PyQt widget construction, routing/preset UI, PEQ controls, trim controls, startup UI, diagnostics, refresh-device behavior, Raw Monitor independent-window behavior, idle recovery hooks, production backdrop cadence |
@@ -982,13 +1014,13 @@ pyinstaller --noconfirm --distpath "." --workpath build renderer_app.spec
 The default PyInstaller output folder is:
 
 ```text
-Finalised Version
+Downmix Renderer Software
 ```
 
-The current production-test build is generated with:
+The current public release build is generated with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "production testing"
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -DistName "Downmix Renderer Software"
 ```
 
 The EXE name remains:
@@ -1008,35 +1040,43 @@ Taskbar identity requirements:
 
 Recommended validation pass:
 
-1. Launch `production testing\Downmixrenderer.exe`.
+1. Launch `Downmix Renderer Software\Downmixrenderer.exe`.
 2. Confirm the app opens without framework/runtime errors.
 3. Confirm the route bar shows `CABLE Input` for the VB-CABLE capture endpoint.
 4. Confirm output selector shows available WASAPI stereo outputs.
 5. Start renderer with a valid route.
 6. Confirm status changes to running and meters update.
 7. Toggle 7.1 Monitor and 9.1.6 Monitor layouts and confirm visualizer/channel tiles update.
-8. Toggle 7.1 surround fill and verify diagnostics report armed/active state.
-9. Toggle 9.1.6 upmix and verify diagnostics report armed/active state.
-10. Load or paste User/global PEQ and confirm status/warning labels.
-11. Load or paste L-R Correction and confirm left/right filter counts.
-12. Toggle L/R swap and confirm correction mapping helper behavior.
-13. Apply channel trim values inside `-24..0 dB` and confirm they persist.
-14. Create, update, select, and delete a preset.
-15. Confirm smart switching selects matching presets when Windows default output changes.
-16. Switch Windows default output from VB-CABLE to normal speakers while rendering a source that stops feeding VB-CABLE; confirm audio routes directly within about 1 second and the renderer pauses/releases, with no Apple Music restart.
-17. Switch Windows default output from normal speakers back to VB-CABLE; confirm the renderer resumes without app restart.
-18. While Apple Music Dolby Atmos is actively playing, switch between direct outputs and confirm switching is seamless, with no app restart and no track change.
-19. While Apple Music Lossless is actively playing, switch between direct outputs and confirm the current track follows the newly selected output without changing tracks.
-20. With renderer stopped and Windows default output on normal speakers, leave the app open for 15 minutes and confirm no capture/render restart attempts.
-21. Rapidly switch Windows default output 10+ times and confirm there are no crashes, stale handles, or audible artifacts.
-22. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
-23. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled only while Windows default output is VB-CABLE.
-24. Open Raw Monitor in both `7.1 Monitor` and `9.1.6 Monitor`; confirm every label lights against the same Channel Field source, including `SL/SR` and height channels.
-25. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
-26. Launch on a clean Windows profile and confirm the taskbar icon is correct immediately before pinning.
-27. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render when default output is VB-CABLE.
-28. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
-29. Relaunch app and confirm settings/presets restore.
+8. Toggle Spatial and Channels visualizers; confirm capsules and Spatial nodes both follow channel loudness/color, and no glow leaks outside capsule edges.
+9. Confirm L/R sum meter behavior, hold/release, and clipping are unchanged, with the signal paint reading darker and more OLED-like than before.
+10. Create, rename, select, and delete a saved profile in Advanced; confirm the compact View selector updates immediately and shows `-` when no profiles exist.
+11. Select a saved profile from the View selector and confirm it applies the same route/layout/PEQ/trim state as Advanced.
+12. Toggle 7.1 surround fill and verify diagnostics report armed/active state.
+13. Toggle 9.1.6 upmix and verify diagnostics report armed/active state.
+14. Feed 5.1-style surround content into the 9.1.6 monitor path and confirm `SL/SR`, rear-center, and height channels respond naturally rather than staying dark.
+15. Feed center-only or mono-front content and confirm generated 9.1.6 channels do not stay constantly lit.
+16. Load or paste User/global PEQ and confirm status/warning labels.
+17. Load or paste L-R Correction and confirm left/right filter counts.
+18. Toggle L/R swap and confirm correction mapping helper behavior.
+19. Apply channel trim values inside `-24..0 dB` and confirm they persist.
+20. Create, update, select, and delete a preset.
+21. Confirm smart switching selects matching presets when Windows default output changes.
+22. Switch Windows default output from VB-CABLE to normal speakers while rendering a source that stops feeding VB-CABLE; confirm audio routes directly within about 1 second and the renderer pauses/releases, with no Apple Music restart.
+23. Switch Windows default output from normal speakers back to VB-CABLE; confirm the renderer resumes without app restart.
+24. While Apple Music Dolby Atmos is actively playing, switch between direct outputs and confirm switching is seamless, with no app restart and no track change.
+25. While Apple Music Lossless is actively playing, switch between direct outputs and confirm the current track follows the newly selected output without changing tracks.
+26. Test VLC and a browser with stereo, 5.1, and 7.1-capable sources where available; confirm no crackle, buffering, or channel-map drift.
+27. Test Bluetooth, wired, virtual cable, and normal speaker outputs at Auto, 48 kHz, 96 kHz, and 192 kHz where the endpoints support them.
+28. With renderer stopped and Windows default output on normal speakers, leave the app open for 15 minutes and confirm no capture/render restart attempts.
+29. Rapidly switch Windows default output 10+ times and confirm there are no crashes, stale handles, or audible artifacts.
+30. Press the route refresh icon after connecting or waking an output device and confirm the current selection is preserved when possible.
+31. Stop renderer and confirm keep-awake can hold the output endpoint open when enabled only while Windows default output is VB-CABLE.
+32. Open Raw Monitor in both `7.1 Monitor` and `9.1.6 Monitor`; confirm every label lights against the same Channel Field source, including `SL/SR` and height channels.
+33. Toggle Auto-start on Boot and confirm the Startup shortcut targets the current `Downmixrenderer.exe`.
+34. Launch on a clean Windows profile and confirm the taskbar icon is correct immediately before pinning.
+35. Leave playback idle, resume playback, and confirm audio returns without pressing Stop/Render when default output is VB-CABLE.
+36. Run Route Probe while renderer is stopped or allow UI to stop/resume it.
+37. Relaunch app and confirm settings/presets restore.
 
 ## 13. Known Limitations
 
@@ -1071,8 +1111,8 @@ The application is considered production-ready when:
 
 - Unit tests pass.
 - Native DLL builds successfully.
-- PyInstaller creates `production testing\Downmixrenderer.exe` for this release.
-- The EXE launches and stays running from `production testing\Downmixrenderer.exe`.
+- PyInstaller creates `Downmix Renderer Software\Downmixrenderer.exe` for this release.
+- The EXE launches and stays running from `Downmix Renderer Software\Downmixrenderer.exe`.
 - The UI restores settings without crashing.
 - Audio stream starts on a valid 16-channel WASAPI input and stereo WASAPI output.
 - DSP snapshot values update under signal.

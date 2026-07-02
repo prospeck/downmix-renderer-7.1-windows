@@ -947,7 +947,7 @@ private:
     }
 
     double apply_sound_enhancer(uint32_t frames, bool& limited) {
-        // Post-mix laptop-speaker loudness: fixed makeup gain, then a fast
+        // Post-mix protected loudness: fixed makeup gain, then a fast
         // inter-sample safety envelope at -1 dBFS before the final limiter.
         // This deliberately leaves matrix, PEQ, trim, and routing math intact.
         limited = false;
@@ -1336,21 +1336,46 @@ private:
         float* sideSrcL = scratch(18);
         float* sideSrcR = scratch(19);
         float* temp = scratch(20);
+        float* sideShapeL = scratch(21);
+        float* sideShapeR = scratch(22);
 
-        const bool estimateSides =
-            peak_channel(bus, frames, 8) <= kUpmix916Threshold &&
-            peak_channel(bus, frames, 9) <= kUpmix916Threshold;
+        const bool hasSideL = peak_channel(bus, frames, 8) > kUpmix916Threshold;
+        const bool hasSideR = peak_channel(bus, frames, 9) > kUpmix916Threshold;
+        const bool hasSides = hasSideL || hasSideR;
+        const bool hasRears =
+            peak_channel(bus, frames, 4) > kUpmix916Threshold ||
+            peak_channel(bus, frames, 5) > kUpmix916Threshold;
+
+        float frontSidePeak = 0.0f;
         for (uint32_t i = 0; i < frames; ++i) {
             const float fl = sample(bus, i, 0);
             const float fr = sample(bus, i, 1);
             const float bl = sample(bus, i, 4);
             const float br = sample(bus, i, 5);
-            sideSrcL[i] = estimateSides ? (0.5f * bl + 0.25f * fl) : sample(bus, i, 8);
-            sideSrcR[i] = estimateSides ? (0.5f * br + 0.25f * fr) : sample(bus, i, 9);
             frontSide[i] = 0.5f * (fl - fr);
-            sideSide[i] = 0.5f * (sideSrcL[i] - sideSrcR[i]);
             rearSide[i] = 0.5f * (bl - br);
+            frontSidePeak = std::max(frontSidePeak, std::abs(frontSide[i]));
         }
+        const bool frontWidthActive = frontSidePeak > kUpmix916Threshold;
+        if (!hasSides && !hasRears && !frontWidthActive) {
+            return false;
+        }
+
+        for (uint32_t i = 0; i < frames; ++i) {
+            if (hasSides) {
+                sideSrcL[i] = sample(bus, i, 8);
+                sideSrcR[i] = sample(bus, i, 9);
+            } else if (hasRears) {
+                sideSrcL[i] = 0.62f * sample(bus, i, 4) + 0.10f * frontSide[i];
+                sideSrcR[i] = 0.62f * sample(bus, i, 5) - 0.10f * frontSide[i];
+            } else {
+                sideSrcL[i] = 0.0f;
+                sideSrcR[i] = 0.0f;
+            }
+            sideSide[i] = (hasSides || hasRears) ? 0.5f * (sideSrcL[i] - sideSrcR[i]) : frontSide[i];
+        }
+        const bool generateSideL = !hasSideL && (!hasSides || hasRears || frontWidthActive);
+        const bool generateSideR = !hasSideR && (!hasSides || hasRears || frontWidthActive);
 
         decorrelate(frontSide, frontAmbL, 0, frames);
         decorrelate(frontSide, frontAmbR, 1, frames);
@@ -1367,55 +1392,99 @@ private:
         highpass_channel(bus, 4, temp, blAir, 5, kUpmixAirHighpassHz, frames);
         highpass_channel(bus, 5, temp, brAir, 6, kUpmixAirHighpassHz, frames);
 
+        if (generateSideL) {
+            if (hasRears) {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    work[i] = 0.50f * sideSrcL[i] + 0.18f * sideAmbL[i] + 0.10f * rearAmbL[i] + 0.08f * frontAmbL[i];
+                }
+                shape_generated(work, sideShapeL, 15, 8, 90.0, 14000.0, 0.0, frames);
+            } else {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    work[i] = 0.46f * sideAmbL[i] + 0.24f * frontAmbL[i];
+                }
+                shape_generated(work, sideShapeL, 15, 8, 180.0, 12500.0, 0.5, frames);
+            }
+            write_generated_channel(bus, sideShapeL, 8, frames);
+        }
+
+        if (generateSideR) {
+            if (hasRears) {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    work[i] = 0.50f * sideSrcR[i] + 0.18f * sideAmbR[i] + 0.10f * rearAmbR[i] + 0.08f * frontAmbR[i];
+                }
+                shape_generated(work, sideShapeR, 16, 9, 90.0, 14000.0, 0.0, frames);
+            } else {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    work[i] = 0.46f * sideAmbR[i] + 0.24f * frontAmbR[i];
+                }
+                shape_generated(work, sideShapeR, 16, 9, 180.0, 12500.0, 0.5, frames);
+            }
+            write_generated_channel(bus, sideShapeR, 9, frames);
+        }
+
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.55f * sample(bus, i, 4) + 0.20f * sideSrcL[i] + 0.20f * rearAmbL[i] + 0.10f * sideAmbL[i];
+            work[i] = hasRears
+                ? 0.48f * sample(bus, i, 4) + 0.14f * sideSrcL[i] + 0.18f * rearAmbL[i] + 0.08f * sideAmbL[i]
+                : 0.24f * sideAmbL[i] + 0.16f * frontAmbL[i];
         }
         shape_generated(work, shaped, 7, 0, 100.0, 14000.0, 0.0, frames);
         write_generated_channel(bus, shaped, 6, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.55f * sample(bus, i, 5) + 0.20f * sideSrcR[i] + 0.20f * rearAmbR[i] + 0.10f * sideAmbR[i];
+            work[i] = hasRears
+                ? 0.48f * sample(bus, i, 5) + 0.14f * sideSrcR[i] + 0.18f * rearAmbR[i] + 0.08f * sideAmbR[i]
+                : 0.24f * sideAmbR[i] + 0.16f * frontAmbR[i];
         }
         shape_generated(work, shaped, 8, 1, 100.0, 14000.0, 0.0, frames);
         write_generated_channel(bus, shaped, 7, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.18f * flAir[i] + 0.06f * fcAir[i] + 0.30f * frontAmbL[i] + 0.08f * sideAmbL[i];
+            work[i] = 0.10f * flAir[i] + 0.04f * fcAir[i] + 0.34f * frontAmbL[i] + 0.10f * sideAmbL[i];
         }
         shape_generated(work, shaped, 9, 2, 200.0, 14000.0, 2.0, frames);
         write_generated_channel(bus, shaped, 10, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.18f * frAir[i] + 0.06f * fcAir[i] + 0.30f * frontAmbR[i] + 0.08f * sideAmbR[i];
+            work[i] = 0.10f * frAir[i] + 0.04f * fcAir[i] + 0.34f * frontAmbR[i] + 0.10f * sideAmbR[i];
         }
         shape_generated(work, shaped, 10, 3, 200.0, 14000.0, 2.0, frames);
         write_generated_channel(bus, shaped, 11, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.16f * slAir[i] + 0.08f * blAir[i] + 0.35f * sideAmbL[i] + 0.12f * rearAmbL[i];
+            work[i] = 0.12f * slAir[i] + 0.08f * blAir[i] + 0.34f * sideAmbL[i] + 0.12f * rearAmbL[i];
         }
         shape_generated(work, shaped, 11, 4, 200.0, 13000.0, 1.0, frames);
         write_generated_channel(bus, shaped, 12, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.16f * srAir[i] + 0.08f * brAir[i] + 0.35f * sideAmbR[i] + 0.12f * rearAmbR[i];
+            work[i] = 0.12f * srAir[i] + 0.08f * brAir[i] + 0.34f * sideAmbR[i] + 0.12f * rearAmbR[i];
         }
         shape_generated(work, shaped, 12, 5, 200.0, 13000.0, 1.0, frames);
         write_generated_channel(bus, shaped, 13, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.16f * blAir[i] + 0.08f * slAir[i] + 0.35f * rearAmbL[i] + 0.10f * sideAmbL[i];
+            work[i] = 0.13f * blAir[i] + 0.07f * slAir[i] + 0.34f * rearAmbL[i] + 0.12f * sideAmbL[i];
         }
         shape_generated(work, shaped, 13, 6, 250.0, 12000.0, 0.5, frames);
         write_generated_channel(bus, shaped, 14, frames);
 
         for (uint32_t i = 0; i < frames; ++i) {
-            work[i] = 0.16f * brAir[i] + 0.08f * srAir[i] + 0.35f * rearAmbR[i] + 0.10f * sideAmbR[i];
+            work[i] = 0.13f * brAir[i] + 0.07f * srAir[i] + 0.34f * rearAmbR[i] + 0.12f * sideAmbR[i];
         }
         shape_generated(work, shaped, 14, 7, 250.0, 12000.0, 0.5, frames);
         write_generated_channel(bus, shaped, 15, frames);
 
-        return true;
+        float generatedPeak = 0.0f;
+        for (const int ch : {6, 7, 10, 11, 12, 13, 14, 15}) {
+            generatedPeak = std::max(generatedPeak, peak_channel(bus, frames, ch));
+        }
+        if (generateSideL) {
+            generatedPeak = std::max(generatedPeak, peak_channel(bus, frames, 8));
+        }
+        if (generateSideR) {
+            generatedPeak = std::max(generatedPeak, peak_channel(bus, frames, 9));
+        }
+        return generatedPeak > kUpmix916Threshold;
     }
 
     void decorrelate(const float* source, float* output, int slot, uint32_t frames) {

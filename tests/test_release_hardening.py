@@ -78,11 +78,46 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $buildDir -Recurse -Force", source)
         self.assertNotIn('Join-Path "dist" $DistName', source)
 
+    def test_public_release_defaults_to_downmix_renderer_software_folder(self) -> None:
+        build_script = (ROOT / "scripts" / "build_release.ps1").read_text(encoding="utf-8")
+        spec = (ROOT / "renderer_app.spec").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        tech_spec = (ROOT / "TECHNICAL_SPECIFICATION.md").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn('[string]$DistName = "Downmix Renderer Software"', build_script)
+        self.assertIn('"DOWNMIX_RENDERER_DIST_NAME", "Downmix Renderer Software"', spec)
+        self.assertIn(r"Downmix Renderer Software\Downmixrenderer.exe", readme)
+        self.assertIn(r"Downmix Renderer Software\Downmixrenderer.exe", tech_spec)
+        for generated_path in (
+            "Downmix Renderer Software/",
+            "production testing/",
+            "ui testing/",
+            "DMR macos/",
+            "*.7z",
+        ):
+            self.assertIn(generated_path, gitignore)
+
     def test_release_package_disables_upx_for_windows_compatibility(self) -> None:
         source = (ROOT / "renderer_app.spec").read_text(encoding="utf-8")
 
         self.assertNotIn("upx=True", source)
         self.assertGreaterEqual(source.count("upx=False"), 2)
+
+    def test_native_ultra_stream_keeps_shared_wasapi_stability_guards(self) -> None:
+        native_source = (ROOT / "cpp_backend" / "downmix_native.cpp").read_text(encoding="utf-8")
+        engine_source = (ROOT / "downmix_renderer" / "audio_engine.py").read_text(encoding="utf-8")
+
+        self.assertIn("config.capture.shareMode = ma_share_mode_shared", native_source)
+        self.assertIn("config.playback.shareMode = ma_share_mode_shared", native_source)
+        self.assertIn("config.periods = 3", native_source)
+        self.assertIn("config.performanceProfile = ma_performance_profile_low_latency", native_source)
+        self.assertIn("config.wasapi.usage = ma_wasapi_usage_pro_audio", native_source)
+        self.assertIn("config.wasapi.noAutoConvertSRC = MA_TRUE", native_source)
+        self.assertIn("out.inputLatency = static_cast<float>(blockSize_) / static_cast<float>(sampleRate_)", native_source)
+        self.assertNotIn("capturePeriodSize_", native_source)
+        self.assertNotIn("playbackPeriodSize_", native_source)
+        self.assertIn('"ultra": ("ultra", "raw")', engine_source)
 
     def test_icon_contains_standard_windows_taskbar_sizes(self) -> None:
         icon_path = ROOT / "assets" / "downmix_renderer_logo.ico"

@@ -214,6 +214,12 @@ class AudioEngine:
         if output_device.max_output_channels < OUTPUT_CHANNELS:
             raise RuntimeError("Output must expose at least 2 channels")
 
+        prepare_output = getattr(self.volume_follower, "prepare_output_endpoint", None)
+        if callable(prepare_output):
+            try:
+                prepare_output(output_device.native_endpoint_for("output"))
+            except Exception:
+                pass
         self._refresh_volume_state(force=True)
 
         requested_profile = _normalize_stream_profile(stream_profile)
