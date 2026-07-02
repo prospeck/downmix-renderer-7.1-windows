@@ -134,6 +134,7 @@ Truth criteria:
 ## Development
 
 For the full implementation reference, see `docs/TECHNICAL_SPECIFICATION.md`.
+For the architecture checkpoint summary, see `docs/ARCHITECTURE.md`.
 For the accepted visual language and interaction rules, see `docs/design.md`.
 
 Run tests:
