@@ -471,7 +471,10 @@ class AppUiTests(unittest.TestCase):
             def close(self) -> None:
                 return None
 
-        with patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream):
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", return_value=None),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
+        ):
             window.keep_awake_checkbox.setChecked(True)
             self.app.processEvents()
 
@@ -968,7 +971,10 @@ class AppUiTests(unittest.TestCase):
             def close(self) -> None:
                 return None
 
-        with patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream):
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", return_value=None),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
+        ):
             window = self.make_window(
                 {
                     "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
@@ -981,6 +987,44 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(opened[0].kwargs["device"], fake_output().id)
         self.assertEqual(opened[0].kwargs["channels"], 2)
         self.assertTrue(opened[0].started)
+
+    def test_launch_with_unsupported_keep_awake_output_stays_open_and_waits(self) -> None:
+        speakers = fake_output()
+        cable_playback = fake_cable_playback_output()
+        opened: list[object] = []
+        saved: list[dict[str, object]] = []
+
+        class FakeOutputStream:
+            def __init__(self, **kwargs) -> None:
+                opened.append(kwargs)
+
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", side_effect=RuntimeError("invalid sample rate")),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
+        ):
+            window = self.make_window(
+                {
+                    "baseline_recovery_version": BASELINE_RECOVERY_VERSION,
+                    "keep_output_awake": True,
+                    "sample_rate_mode": "192000",
+                    "was_running": True,
+                    "resume_on_launch": True,
+                },
+                saved,
+                devices=[fake_input(), speakers, cable_playback],
+                default_output=speakers,
+            )
+            starts: list[str] = []
+            window.start_audio = lambda: starts.append("start")
+            window._auto_start_if_needed()
+
+        self.assertEqual(opened, [])
+        self.assertEqual(starts, [])
+        self.assertFalse(window._closing_with_animation)
+        self.assertFalse(window.engine.keep_awake.active)
+        self.assertIn("invalid sample rate", window.engine.keep_awake.last_error)
+        self.assertTrue(window._paused_for_direct_output)
+        self.assertTrue(saved[-1]["resume_on_launch"])
 
     def test_renderer_page_removes_large_downmix_renderer_title(self) -> None:
         window = self.make_window()

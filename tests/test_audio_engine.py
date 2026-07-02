@@ -42,6 +42,14 @@ def fake_device(mode: str, endpoint_id: str | None = None, samplerate: int = 480
 
 
 class AudioEngineSettingsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        input_check = patch("downmix_renderer.audio_engine.sd.check_input_settings", return_value=None)
+        output_check = patch("downmix_renderer.audio_engine.sd.check_output_settings", return_value=None)
+        input_check.start()
+        output_check.start()
+        self.addCleanup(input_check.stop)
+        self.addCleanup(output_check.stop)
+
     def test_raw_stream_kwargs_use_low_latency_path(self) -> None:
         opened: list[dict[str, object]] = []
 
@@ -107,6 +115,38 @@ class AudioEngineSettingsTests(unittest.TestCase):
         self.assertEqual(opened[0]["blocksize"], 1024)
         self.assertEqual(snapshot.sample_rate, 192000)
         self.assertEqual(snapshot.sample_rate_mode, "192000")
+
+    def test_start_preflights_output_format_before_opening_renderer_stream(self) -> None:
+        opened: list[dict[str, object]] = []
+
+        class FakeStream:
+            def __init__(self, **kwargs) -> None:
+                opened.append(kwargs)
+                self.cpu_load = 0.0
+                self.latency = (0.0, 0.0)
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        engine = AudioEngine(backend="python")
+        try:
+            with (
+                patch("downmix_renderer.audio_engine.sd.check_input_settings", return_value=None),
+                patch("downmix_renderer.audio_engine.sd.check_output_settings", side_effect=RuntimeError("invalid sample rate")),
+                patch("downmix_renderer.audio_engine.sd.Stream", FakeStream),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "invalid sample rate"):
+                    engine.start(fake_device("input"), fake_device("output"), "ultra", sample_rate_mode="192000")
+
+            self.assertEqual(opened, [])
+        finally:
+            engine.close()
 
     def test_auto_sample_rate_prefers_selected_input_default_rate(self) -> None:
         input_device = fake_device("input", samplerate=192000)
@@ -451,6 +491,7 @@ class AudioEngineSettingsTests(unittest.TestCase):
                 return None
 
         with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", return_value=None),
             patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
             patch("downmix_renderer.audio_engine.sd.Stream", FakeStream),
         ):
@@ -493,11 +534,32 @@ class AudioEngineSettingsTests(unittest.TestCase):
             def __init__(self, **kwargs) -> None:
                 raise RuntimeError("output unavailable")
 
-        with patch("downmix_renderer.audio_engine.sd.OutputStream", FailingOutputStream):
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", return_value=None),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FailingOutputStream),
+        ):
             keep_awake.set_enabled(True, fake_device("output"), renderer_running=False)
 
         self.assertFalse(keep_awake.active)
         self.assertIn("output unavailable", keep_awake.last_error)
+
+    def test_keep_awake_preflights_output_format_before_opening_stream(self) -> None:
+        keep_awake = OutputKeepAwake()
+        opened: list[object] = []
+
+        class FakeOutputStream:
+            def __init__(self, **kwargs) -> None:
+                opened.append(kwargs)
+
+        with (
+            patch("downmix_renderer.audio_engine.sd.check_output_settings", side_effect=RuntimeError("invalid sample rate")),
+            patch("downmix_renderer.audio_engine.sd.OutputStream", FakeOutputStream),
+        ):
+            keep_awake.set_enabled(True, fake_device("output"), renderer_running=False, sample_rate=192000)
+
+        self.assertFalse(keep_awake.active)
+        self.assertEqual(opened, [])
+        self.assertIn("invalid sample rate", keep_awake.last_error)
 
 
 if __name__ == "__main__":
