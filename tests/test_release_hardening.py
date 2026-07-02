@@ -82,7 +82,7 @@ class ReleaseHardeningTests(unittest.TestCase):
         build_script = (ROOT / "scripts" / "build_release.ps1").read_text(encoding="utf-8")
         spec = (ROOT / "renderer_app.spec").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        tech_spec = (ROOT / "TECHNICAL_SPECIFICATION.md").read_text(encoding="utf-8")
+        tech_spec = (ROOT / "docs" / "TECHNICAL_SPECIFICATION.md").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn('[string]$DistName = "Downmix Renderer Software"', build_script)
