@@ -183,6 +183,27 @@ class StartupShortcutTests(unittest.TestCase):
             self.assertEqual(working_directory, executable.parent)
             self.assertEqual(icon, executable)
 
+    def test_source_shortcut_config_prefers_public_release_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as app_dir:
+            app_root = Path(app_dir)
+            current = app_root / "Downmix Renderer Software" / "Downmixrenderer.exe"
+            legacy = app_root / "production testing" / "Downmixrenderer.exe"
+            current.parent.mkdir(parents=True)
+            legacy.parent.mkdir(parents=True)
+            current.write_text("current exe", encoding="utf-8")
+            legacy.write_text("legacy exe", encoding="utf-8")
+
+            with (
+                patch.object(startup.sys, "frozen", False, create=True),
+                patch.object(startup.sys, "executable", str(app_root / "python.exe")),
+            ):
+                target, arguments, working_directory, icon = startup._shortcut_config(app_root)
+
+            self.assertEqual(target, current)
+            self.assertEqual(arguments, "")
+            self.assertEqual(working_directory, current.parent)
+            self.assertEqual(icon, current)
+
     def test_enabled_shortcut_must_match_production_testing_executable_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as appdata, tempfile.TemporaryDirectory() as app_dir:
             with patch.dict(os.environ, {"APPDATA": appdata}, clear=False):

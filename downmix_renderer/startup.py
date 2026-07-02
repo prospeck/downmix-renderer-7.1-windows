@@ -7,6 +7,8 @@ from pathlib import Path
 APP_STARTUP_FILE = "Downmix Renderer.lnk"
 LEGACY_STARTUP_FILES = ("DownmixRenderer.cmd", "TaranDownmixRendererSuite.cmd")
 PRODUCTION_DIST_NAME = "production testing"
+PUBLIC_RELEASE_DIST_NAME = "Downmix Renderer Software"
+PACKAGE_DIST_NAMES = (PUBLIC_RELEASE_DIST_NAME, PRODUCTION_DIST_NAME)
 PACKAGE_EXECUTABLE_NAME = "Downmixrenderer.exe"
 RELATED_STARTUP_EXTENSIONS = {".lnk", ".cmd", ".bat", ".ps1"}
 RELATED_STARTUP_MARKERS = (
@@ -157,8 +159,12 @@ def _preferred_packaged_target(app_root: Path | None) -> Path | None:
         return Path(sys.executable)
     if app_root is None:
         return None
-    packaged = Path(app_root) / PRODUCTION_DIST_NAME / PACKAGE_EXECUTABLE_NAME
-    return packaged if packaged.exists() else None
+    root = Path(app_root)
+    for dist_name in PACKAGE_DIST_NAMES:
+        packaged = root / dist_name / PACKAGE_EXECUTABLE_NAME
+        if packaged.exists():
+            return packaged
+    return None
 
 
 def _shortcut_target(path: Path) -> Path | None:
