@@ -54,7 +54,9 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn('"-Wall"', source)
         self.assertIn('"-Wextra"', source)
         self.assertIn("DLL.with_suffix", source)
-        self.assertIn("PDB.unlink", source)
+        self.assertIn("IMPORT_LIB", source)
+        self.assertIn("(PDB, IMPORT_LIB)", source)
+        self.assertIn("artifact.unlink", source)
 
     def test_release_signing_script_signs_and_verifies_pe_files(self) -> None:
         source = (ROOT / "scripts" / "sign_release.ps1").read_text(encoding="utf-8")
