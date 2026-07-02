@@ -2173,7 +2173,7 @@ class AppUiTests(unittest.TestCase):
         dialog = window.diagnostics_dialog
 
         self.assertIsInstance(dialog, DiagnosticsDialog)
-        self.assertEqual(dialog.minimumSize(), QtCore.QSize(700, 336))
+        self.assertEqual(dialog.minimumSize(), QtCore.QSize(560, 420))
         self.assertIsNone(dialog.parent())
         self.assertTrue(bool(dialog.windowFlags() & QtCore.Qt.Window))
         self.assertTrue(bool(dialog.windowFlags() & QtCore.Qt.WindowMinimizeButtonHint))

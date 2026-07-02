@@ -3702,7 +3702,7 @@ class DiagnosticsDialog(DotBackdropDialog):
             | QtCore.Qt.WindowCloseButtonHint
         )
         self.setWindowModality(QtCore.Qt.NonModal)
-        self.setMinimumSize(700, 336)
+        self.setMinimumSize(560, 420)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
